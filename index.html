@@ -219,6 +219,60 @@
     .session-summary.is-complete .progress-track::-webkit-progress-value { background: var(--completed); }
     .session-summary.is-complete .progress-track::-moz-progress-bar { background: var(--completed); }
 
+    .today-status {
+      margin: 0.45rem 0 0;
+      color: var(--text-secondary);
+      font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
+      font-size: 0.74rem;
+      font-weight: 700;
+    }
+
+    .session-summary.is-complete .today-status { color: var(--completed); }
+
+    .history-list {
+      display: grid;
+      gap: 0.4rem;
+      margin: 0.85rem 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .history-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.6rem;
+      padding: 0.5rem 0.7rem;
+      border: 1px solid var(--border);
+      border-radius: 0.7rem;
+      background: var(--surface);
+      font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
+      font-size: 0.78rem;
+      font-weight: 700;
+    }
+
+    .history-row.is-today { border-color: color-mix(in srgb, var(--accent) 48%, var(--border)); }
+
+    .history-row.is-complete {
+      border-color: color-mix(in srgb, var(--completed) 42%, var(--border));
+      background: color-mix(in srgb, var(--completed-soft) 45%, var(--surface));
+    }
+
+    .history-state {
+      color: var(--text-secondary);
+      font-size: 0.74rem;
+      font-weight: 700;
+    }
+
+    .history-row.is-complete .history-state { color: var(--completed); }
+
+    .history-empty {
+      margin: 0.85rem 0 0;
+      color: var(--text-secondary);
+      font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
+      font-size: 0.76rem;
+    }
+
     .ruqyah-list {
       position: relative;
       isolation: isolate;
@@ -847,11 +901,12 @@
       </div>
 
       <section class="session-summary" id="session-summary" aria-labelledby="session-title">
-        <h2 class="sr-only" id="session-title">تقدم رقية القرين</h2>
+        <h2 class="sr-only" id="session-title">تقدم رقية اليوم</h2>
         <div class="summary-row">
-          <p class="session-progress-copy" id="session-progress-copy">٠ من ٢٥ تكرارًا</p>
-          <progress class="progress-track" id="session-progress" value="0" max="25" aria-label="تقدم رقية القرين"></progress>
+          <p class="session-progress-copy" id="session-progress-copy">٠ من ٣٣ تكرارًا</p>
+          <progress class="progress-track" id="session-progress" value="0" max="33" aria-label="تقدم رقية اليوم"></progress>
         </div>
+        <p class="today-status" id="today-status">رقية اليوم لم تكتمل بعد.</p>
       </section>
     </header>
 
@@ -943,6 +998,12 @@
         <p class="settings-note" id="install-status">يمكن تثبيت التطبيق من قائمة المتصفح عند توفر الخيار.</p>
       </section>
 
+      <section class="settings-section" aria-labelledby="history-title">
+        <h3 id="history-title">سجل الأيام</h3>
+        <p class="settings-note" id="history-note">يُسجَّل اليوم عند اكتمال جميع المقاطع، وتبدأ رقية جديدة تلقائيًا بعد منتصف الليل.</p>
+        <ol class="history-list" id="history-list" aria-describedby="history-note"></ol>
+      </section>
+
       <section class="settings-section" aria-labelledby="about-title">
         <h3 id="about-title">عن الرقية</h3>
         <p class="settings-note">
@@ -983,6 +1044,8 @@
     "use strict";
 
     const progressStorageKey = "ruqyah-progress-v1";
+    const dailyStorageKey = "ruqyah-daily-v1";
+    const historyLimit = 30;
     const hapticsStorageKey = "ruqyah-haptics";
     const themeStorageKey = "ruqyah-theme";
     const textSizeStorageKey = "ruqyah-text-size";
@@ -1024,12 +1087,18 @@
     const updateDismiss = document.getElementById("update-dismiss");
     const themeColor = document.getElementById("theme-color");
     const liveRegion = document.getElementById("live-region");
+    const todayStatus = document.getElementById("today-status");
+    const historyList = document.getElementById("history-list");
     const motionIsReduced = matchMedia("(prefers-reduced-motion: reduce)");
     const colorScheme = matchMedia("(prefers-color-scheme: dark)");
 
     const totalRepeats = RUQYAH_SEGMENTS.reduce((sum, segment) => sum + segment.repeat, 0);
 
-    let progress = loadProgress();
+    const dateFormatter = new Intl.DateTimeFormat("ar-EG", { weekday: "long", day: "numeric", month: "long" });
+    const timeFormatter = new Intl.DateTimeFormat("ar-EG", { hour: "numeric", minute: "2-digit" });
+
+    let state = loadState();
+    let progress = state.counts;
     let hapticsEnabled = true;
     try { hapticsEnabled = localStorage.getItem(hapticsStorageKey) !== "off"; } catch (_) {}
     hapticsToggle.checked = hapticsEnabled;
@@ -1040,26 +1109,135 @@
     let waitingWorker = null;
     let reloadingForUpdate = false;
     let advanceTimer = null;
+    let dayRolloverTimer = null;
     let swipeGesture = null;
     let swipeSettleTimer = null;
     let suppressCardClicksUntil = 0;
 
-    function loadProgress() {
-      try {
-        const raw = JSON.parse(localStorage.getItem(progressStorageKey) || "{}");
-        const counts = {};
-        for (const segment of RUQYAH_SEGMENTS) {
-          const value = Number(raw?.[segment.id]);
-          counts[segment.id] = Number.isInteger(value) ? Math.max(0, Math.min(value, segment.repeat)) : 0;
-        }
-        return counts;
-      } catch (_) {
-        return Object.fromEntries(RUQYAH_SEGMENTS.map(segment => [segment.id, 0]));
-      }
+    function localDateKey(date = new Date()) {
+      const year = date.getFullYear();
+      const month = String(date.getMonth() + 1).padStart(2, "0");
+      const day = String(date.getDate()).padStart(2, "0");
+      return `${year}-${month}-${day}`;
     }
 
-    function saveProgress() {
-      try { localStorage.setItem(progressStorageKey, JSON.stringify(progress)); } catch (_) {}
+    function emptyCounts() {
+      return Object.fromEntries(RUQYAH_SEGMENTS.map(segment => [segment.id, 0]));
+    }
+
+    function normalizeCounts(raw) {
+      const counts = emptyCounts();
+      for (const segment of RUQYAH_SEGMENTS) {
+        const value = Number(raw?.[segment.id]);
+        if (Number.isInteger(value)) counts[segment.id] = Math.max(0, Math.min(value, segment.repeat));
+      }
+      return counts;
+    }
+
+    function normalizeHistory(raw) {
+      const history = {};
+      if (!raw || typeof raw !== "object") return history;
+      for (const [date, entry] of Object.entries(raw)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+        const completedAt = typeof entry?.completedAt === "string" ? entry.completedAt : null;
+        if (completedAt) history[date] = { completedAt };
+      }
+      return history;
+    }
+
+    function loadState() {
+      const today = localDateKey();
+      try {
+        const raw = JSON.parse(localStorage.getItem(dailyStorageKey) || "null");
+        if (raw) {
+          const date = /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : today;
+          return {
+            date: today,
+            counts: date === today ? normalizeCounts(raw.counts) : emptyCounts(),
+            history: normalizeHistory(raw.history)
+          };
+        }
+        const legacy = JSON.parse(localStorage.getItem(progressStorageKey) || "null");
+        if (legacy) {
+          try { localStorage.removeItem(progressStorageKey); } catch (_) {}
+          return { date: today, counts: normalizeCounts(legacy), history: {} };
+        }
+      } catch (_) {}
+      return { date: today, counts: emptyCounts(), history: {} };
+    }
+
+    function saveState() {
+      state.counts = progress;
+      try { localStorage.setItem(dailyStorageKey, JSON.stringify(state)); } catch (_) {}
+    }
+
+    function trimHistory() {
+      const dates = Object.keys(state.history).sort();
+      while (dates.length > 365) delete state.history[dates.shift()];
+    }
+
+    function todayIsRecorded() {
+      return Boolean(state.history[state.date]);
+    }
+
+    function recordToday() {
+      if (todayIsRecorded()) return false;
+      state.history[state.date] = { completedAt: new Date().toISOString() };
+      trimHistory();
+      saveState();
+      return true;
+    }
+
+    function ensureCurrentDay() {
+      const today = localDateKey();
+      if (state.date === today) return false;
+      state.date = today;
+      progress = emptyCounts();
+      state.counts = progress;
+      saveState();
+      RUQYAH_SEGMENTS.forEach((segment, index) => updateCard(segment, index));
+      updateSessionProgress();
+      showCard(0, "back");
+      liveRegion.textContent = "بدأ يوم جديد، وأعيدت عدادات الرقية.";
+      return true;
+    }
+
+    function scheduleDayRollover() {
+      clearTimeout(dayRolloverTimer);
+      const nextDay = new Date();
+      nextDay.setHours(24, 0, 1, 0);
+      dayRolloverTimer = setTimeout(() => {
+        ensureCurrentDay();
+        scheduleDayRollover();
+      }, Math.max(1000, nextDay.getTime() - Date.now()));
+    }
+
+    function historyDateLabel(date) {
+      const [year, month, day] = date.split("-").map(Number);
+      return dateFormatter.format(new Date(year, month - 1, day));
+    }
+
+    function updateHistoryView() {
+      const dates = Object.keys(state.history).sort().reverse().slice(0, historyLimit);
+      if (!dates.includes(state.date)) dates.unshift(state.date);
+      historyList.innerHTML = dates.map(date => {
+        const entry = state.history[date];
+        const isToday = date === state.date;
+        const time = entry ? timeFormatter.format(new Date(entry.completedAt)) : "";
+        const stateCopy = entry ? `تمت ${time}` : (isToday ? "لم تكتمل بعد" : "لم تُسجل");
+        return `
+          <li class="history-row${entry ? " is-complete" : ""}${isToday ? " is-today" : ""}">
+            <span>${escapeHtml(isToday ? `اليوم — ${historyDateLabel(date)}` : historyDateLabel(date))}</span>
+            <span class="history-state">${escapeHtml(stateCopy)}</span>
+          </li>`;
+      }).join("");
+    }
+
+    function updateTodayStatus() {
+      const entry = state.history[state.date];
+      todayStatus.textContent = entry
+        ? `تمت رقية اليوم في ${timeFormatter.format(new Date(entry.completedAt))}.`
+        : "رقية اليوم لم تكتمل بعد.";
     }
 
     function countFor(segment) { return progress[segment.id] ?? 0; }
@@ -1152,8 +1330,9 @@
       progressBar.max = totalRepeats;
       progressBar.value = done;
       progressCopy.textContent = `${formatNumber(done)} من ${formatNumber(totalRepeats)} تكرارًا`;
-      sessionSummary.classList.toggle("is-complete", done >= totalRepeats);
+      sessionSummary.classList.toggle("is-complete", todayIsRecorded() || done >= totalRepeats);
       sessionReset.disabled = done === 0;
+      updateTodayStatus();
     }
 
     function updateDeckNavigation() {
@@ -1223,19 +1402,24 @@
     }
 
     function countReading(segment, index) {
+      if (ensureCurrentDay()) return;
       if (isComplete(segment)) return;
       const next = countFor(segment) + 1;
       progress[segment.id] = next;
       const completesSegment = next >= segment.repeat;
       if (completesSegment) triggerHaptic(hapticDurationMs);
-      saveProgress();
+      saveState();
       updateCard(segment, index, true);
-      updateSessionProgress();
 
       if (allComplete()) {
+        recordToday();
+        updateSessionProgress();
+        updateHistoryView();
         completionDialog.showModal();
         return;
       }
+
+      updateSessionProgress();
       if (completesSegment) scheduleAdvance(index);
     }
 
@@ -1250,7 +1434,7 @@
       if (!countFor(segment)) return;
       askConfirmation("إعادة العداد؟", `سيعود عداد ${segment.surah} ${segment.range} إلى الصفر.`, () => {
         progress[segment.id] = 0;
-        saveProgress();
+        saveState();
         updateCard(segment, index, true);
         updateSessionProgress();
       });
@@ -1259,7 +1443,7 @@
     function resetSession(skipConfirmation = false) {
       const apply = () => {
         for (const segment of RUQYAH_SEGMENTS) progress[segment.id] = 0;
-        saveProgress();
+        saveState();
         RUQYAH_SEGMENTS.forEach((segment, index) => updateCard(segment, index));
         updateSessionProgress();
         showCard(0, "back", true);
@@ -1416,6 +1600,7 @@
       });
       showCard(currentIndex, "forward");
       updateSessionProgress();
+      updateHistoryView();
     }
 
     function applyTheme(theme) {
@@ -1451,7 +1636,9 @@
     sessionReset.addEventListener("click", () => resetSession());
 
     settingsButton.addEventListener("click", () => {
+      ensureCurrentDay();
       updateInstallUi();
+      updateHistoryView();
       settingsDialog.showModal();
     });
     settingsDialogClose.addEventListener("click", () => settingsDialog.close());
@@ -1568,6 +1755,11 @@
     updateInstallUi();
     registerServiceWorker();
     document.fonts?.ready.then(() => fitVisibleCard());
+    scheduleDayRollover();
+    addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "visible") ensureCurrentDay();
+    });
+    addEventListener("focus", () => ensureCurrentDay());
   </script>
 </body>
 </html>
