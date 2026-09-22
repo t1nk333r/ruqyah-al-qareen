@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="رقية القرين">
+  <defs>
+    <linearGradient id="background" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3f6ea8"/>
+      <stop offset="1" stop-color="#23456e"/>
+    </linearGradient>
+    <linearGradient id="shield" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f7fbff"/>
+      <stop offset="1" stop-color="#cfe2f7"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="512" height="512" rx="114" fill="url(#background)"/>
+
+  <path d="M256 92 118 146v136c0 90 58 158 138 180 80-22 138-90 138-180V146L256 92z"
+        fill="url(#shield)" opacity="0.97"/>
+
+  <path d="M256 128 152 168v114c0 72 44 128 104 148 60-20 104-76 104-148V168L256 128z"
+        fill="none" stroke="#2f5a8f" stroke-width="12" stroke-linejoin="round" opacity="0.5"/>
+
+  <path d="M300 196a76 76 0 1 0 0 120 62 62 0 1 1 0-120z" fill="#2f5a8f"/>
+
+  <circle cx="330" cy="256" r="16" fill="#3f6ea8"/>
+
+  <g fill="#2f5a8f" opacity="0.72">
+    <circle cx="200" cy="200" r="9"/>
+    <circle cx="200" cy="256" r="9"/>
+    <circle cx="200" cy="312" r="9"/>
+  </g>
+</svg>
