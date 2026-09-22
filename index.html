@@ -622,6 +622,38 @@
       color: var(--accent-strong);
     }
 
+    .reset-options {
+      display: grid;
+      gap: 0.5rem;
+      margin-block-start: 0.9rem;
+    }
+
+    .reset-option {
+      display: grid;
+      gap: 0.12rem;
+      padding: 0.65rem 0.8rem;
+      border: 1px solid var(--border);
+      border-radius: 0.85rem;
+      background: var(--surface-raised);
+      color: inherit;
+      font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
+      text-align: start;
+      cursor: pointer;
+      transition: border-color 150ms ease, background-color 150ms ease, transform 100ms ease;
+    }
+
+    .reset-option:active { transform: scale(0.99); }
+    .reset-option strong { font-size: 0.88rem; }
+
+    .reset-option small {
+      color: var(--text-secondary);
+      font-size: 0.72rem;
+      font-weight: 600;
+    }
+
+    .reset-option:hover,
+    .reset-option:focus-visible { border-color: color-mix(in srgb, var(--accent) 50%, var(--border)); }
+
     .sheet-dialog {
       width: min(34rem, calc(100vw - 1.5rem));
       max-height: 86vh;
@@ -889,7 +921,7 @@
           <h1>رقية القرين</h1>
         </div>
         <div class="header-actions">
-          <button class="icon-button" id="session-reset" type="button" aria-label="إعادة الرقية كاملة" disabled>
+          <button class="icon-button" id="session-reset" type="button" aria-label="خيارات الإعادة" disabled>
             <span aria-hidden="true">↻</span><span class="button-label">إعادة الكل</span>
           </button>
           <button class="icon-button" id="settings-button" type="button" aria-haspopup="dialog" aria-label="فتح الإعدادات">
@@ -933,6 +965,30 @@
     <div class="dialog-actions">
       <button class="dialog-button" id="confirm-cancel" type="button">إلغاء</button>
       <button class="dialog-button primary" id="confirm-accept" type="button">إعادة</button>
+    </div>
+  </dialog>
+
+  <dialog id="reset-dialog" aria-labelledby="reset-dialog-title" aria-describedby="reset-dialog-copy">
+    <div class="dialog-body">
+      <h2 id="reset-dialog-title">ما الذي تريد إعادته؟</h2>
+      <p id="reset-dialog-copy">اختر نطاق الإعادة. لا يُرسل شيء خارج هذا الجهاز.</p>
+      <div class="reset-options">
+        <button class="reset-option" id="reset-day" type="button">
+          <strong>تقدم اليوم</strong>
+          <small>إعادة عدادات اليوم فقط مع بقاء السجل كما هو.</small>
+        </button>
+        <button class="reset-option" id="reset-week" type="button">
+          <strong>هذا الأسبوع</strong>
+          <small>إعادة عدادات اليوم وحذف سجل آخر سبعة أيام.</small>
+        </button>
+        <button class="reset-option" id="reset-everything" type="button">
+          <strong>كل شيء</strong>
+          <small>إعادة العدادات وحذف السجل كاملًا.</small>
+        </button>
+      </div>
+    </div>
+    <div class="dialog-actions">
+      <button class="dialog-button" id="reset-dialog-cancel" type="button">إلغاء</button>
     </div>
   </dialog>
 
@@ -1080,6 +1136,11 @@
     const completionDialog = document.getElementById("completion-dialog");
     const completionClose = document.getElementById("completion-close");
     const completionRestart = document.getElementById("completion-restart");
+    const resetDialog = document.getElementById("reset-dialog");
+    const resetDayButton = document.getElementById("reset-day");
+    const resetWeekButton = document.getElementById("reset-week");
+    const resetEverythingButton = document.getElementById("reset-everything");
+    const resetDialogCancel = document.getElementById("reset-dialog-cancel");
     const installButton = document.getElementById("install-button");
     const installStatus = document.getElementById("install-status");
     const updateBanner = document.getElementById("update-banner");
@@ -1331,7 +1392,7 @@
       progressBar.value = done;
       progressCopy.textContent = `${formatNumber(done)} من ${formatNumber(totalRepeats)} تكرارًا`;
       sessionSummary.classList.toggle("is-complete", todayIsRecorded() || done >= totalRepeats);
-      sessionReset.disabled = done === 0;
+      sessionReset.disabled = done === 0 && Object.keys(state.history).length === 0;
       updateTodayStatus();
     }
 
@@ -1440,20 +1501,63 @@
       });
     }
 
-    function resetSession(skipConfirmation = false) {
-      const apply = () => {
-        for (const segment of RUQYAH_SEGMENTS) progress[segment.id] = 0;
-        saveState();
-        RUQYAH_SEGMENTS.forEach((segment, index) => updateCard(segment, index));
-        updateSessionProgress();
-        showCard(0, "back", true);
-        liveRegion.textContent = "تمت إعادة الرقية كاملة";
-      };
-      if (skipConfirmation) {
-        apply();
-        return;
+    function resetDayProgress(announce = true) {
+      for (const segment of RUQYAH_SEGMENTS) progress[segment.id] = 0;
+      saveState();
+      RUQYAH_SEGMENTS.forEach((segment, index) => updateCard(segment, index));
+      updateSessionProgress();
+      updateHistoryView();
+      showCard(0, "back", announce);
+      if (announce) liveRegion.textContent = "أُعيدت عدادات اليوم";
+    }
+
+    function recentDates(days) {
+      const dates = [];
+      const today = new Date();
+      for (let offset = 0; offset < days; offset += 1) {
+        const date = new Date(today.getFullYear(), today.getMonth(), today.getDate() - offset);
+        dates.push(localDateKey(date));
       }
-      askConfirmation("إعادة الرقية كاملة؟", "ستعود جميع العدادات إلى الصفر.", apply);
+      return dates;
+    }
+
+    function dayCountLabel(count) {
+      if (count === 1) return "يوم واحد";
+      if (count === 2) return "يومان";
+      if (count <= 10) return `${formatNumber(count)} أيام`;
+      return `${formatNumber(count)} يومًا`;
+    }
+
+    function resetWeek() {
+      const dates = recentDates(7);
+      const recorded = dates.filter(date => state.history[date]).length;
+      askConfirmation(
+        "حذف سجل هذا الأسبوع؟",
+        `ستُعاد عدادات اليوم، وسيُحذف ${recorded ? `سجل ${dayCountLabel(recorded)} من آخر أسبوع` : "سجل آخر سبعة أيام"}. لا يمكن التراجع.`,
+        () => {
+          for (const date of dates) delete state.history[date];
+          resetDayProgress(false);
+          liveRegion.textContent = "حُذف سجل آخر سبعة أيام";
+        }
+      );
+    }
+
+    function resetEverything() {
+      const recorded = Object.keys(state.history).length;
+      askConfirmation(
+        "حذف كل شيء؟",
+        `ستُعاد العدادات وسيُحذف السجل كاملًا${recorded ? ` (${dayCountLabel(recorded)})` : ""}. لا يمكن التراجع.`,
+        () => {
+          state.history = {};
+          resetDayProgress(false);
+          liveRegion.textContent = "حُذف السجل كاملًا";
+        }
+      );
+    }
+
+    function openResetDialog() {
+      ensureCurrentDay();
+      resetDialog.showModal();
     }
 
     function clearCardSwipeStyles(item) {
@@ -1633,7 +1737,23 @@
 
     previousCardButton.addEventListener("click", () => showCard(currentIndex - 1, "back", true));
     nextCardButton.addEventListener("click", () => showCard(currentIndex + 1, "forward", true));
-    sessionReset.addEventListener("click", () => resetSession());
+    sessionReset.addEventListener("click", openResetDialog);
+    resetDialogCancel.addEventListener("click", () => resetDialog.close());
+    resetDialog.addEventListener("click", event => {
+      if (event.target === resetDialog) resetDialog.close();
+    });
+    resetDayButton.addEventListener("click", () => {
+      resetDialog.close();
+      resetDayProgress();
+    });
+    resetWeekButton.addEventListener("click", () => {
+      resetDialog.close();
+      resetWeek();
+    });
+    resetEverythingButton.addEventListener("click", () => {
+      resetDialog.close();
+      resetEverything();
+    });
 
     settingsButton.addEventListener("click", () => {
       ensureCurrentDay();
@@ -1661,7 +1781,7 @@
     completionClose.addEventListener("click", () => completionDialog.close());
     completionRestart.addEventListener("click", () => {
       completionDialog.close();
-      resetSession(true);
+      resetDayProgress(false);
     });
 
     themeSelect.addEventListener("change", () => {
