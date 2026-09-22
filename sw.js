@@ -1,10 +1,10 @@
 "use strict";
 
-const CACHE_NAME = "ruqyah-static-v1";
+const CACHE_NAME = "ruqyah-static-v3";
 const APP_SHELL = [
   "./",
   "./index.html",
-  "./content.js?v=1",
+  "./content.js?v=3",
   "./manifest.webmanifest?v=1",
   "./icons/icon.svg?v=1",
   "./icons/icon-192.png?v=1",

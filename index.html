@@ -342,6 +342,8 @@
     .card-body {
       position: relative;
       z-index: 1;
+      display: grid;
+      align-content: center;
       min-block-size: 0;
       padding-block: 0.85rem;
       overflow-y: auto;
@@ -362,6 +364,23 @@
       margin-block-end: 0.7rem;
       color: var(--accent-strong);
       font-size: calc(var(--quran-text-size) * 0.92);
+    }
+
+    .surah-card.is-fit-1 .card-body { --fit-scale: 0.94; --fit-lead: 0.12; }
+    .surah-card.is-fit-2 .card-body { --fit-scale: 0.88; --fit-lead: 0.24; }
+    .surah-card.is-fit-3 .card-body { --fit-scale: 0.82; --fit-lead: 0.34; }
+    .surah-card.is-fit-4 .card-body { --fit-scale: 0.76; --fit-lead: 0.44; }
+    .surah-card.is-fit-5 .card-body { --fit-scale: 0.70; --fit-lead: 0.54; }
+
+    .surah-card[class*="is-fit-"] .ayat,
+    .surah-card[class*="is-fit-"] .basmala {
+      font-size: calc(var(--quran-text-size) * var(--fit-scale, 1));
+      line-height: calc(var(--quran-line-height) - var(--fit-lead, 0));
+    }
+
+    .surah-card[class*="is-fit-"] .basmala {
+      font-size: calc(var(--quran-text-size) * var(--fit-scale, 1) * 0.92);
+      margin-block-end: 0.5rem;
     }
 
     .ayah-number {
@@ -927,8 +946,10 @@
       <section class="settings-section" aria-labelledby="about-title">
         <h3 id="about-title">عن الرقية</h3>
         <p class="settings-note">
-          النص القرآني بالرسم العثماني. الترتيب: سورة ق (١–٢٢) مرة، ثم (٢٣–٢٩) سبع مرات، ثم (٣٠–٤٥) مرة،
-          ثم سورة الجن مرة، ثم سورة التكوير مرة، ثم سورة الكافرون سبع مرات، ثم سورة الناس سبع مرات.
+          النص القرآني بالرسم العثماني، ومقسَّم إلى صفحات قصيرة تُقرأ دون تمرير.
+          الترتيب: سورة ق (١–٢٢) مرة على ثلاث صفحات، ثم (٢٣–٢٩) سبع مرات، ثم (٣٠–٤٥) مرة على صفحتين،
+          ثم سورة الجن مرة على أربع صفحات، ثم سورة التكوير مرة على ثلاث صفحات،
+          ثم سورة الكافرون سبع مرات، ثم سورة الناس سبع مرات.
           التطبيق يعين على العدّ فقط ولا يقدّم فتوى.
         </p>
       </section>
@@ -957,7 +978,7 @@
 
   <p class="sr-only" id="live-region" aria-live="polite"></p>
 
-  <script src="./content.js?v=1"></script>
+  <script src="./content.js?v=3"></script>
   <script>
     "use strict";
 
@@ -1156,7 +1177,10 @@
       });
 
       const activeItem = list.children[currentIndex];
-      if (activeItem) activeItem.querySelector(".card-body").scrollTop = 0;
+      if (activeItem) {
+        activeItem.querySelector(".card-body").scrollTop = 0;
+        fitCardText(activeItem.querySelector(".surah-card"));
+      }
 
       if (direction && activeItem && !motionIsReduced.matches) {
         requestAnimationFrame(() => {
@@ -1167,6 +1191,22 @@
 
       updateDeckNavigation();
       if (announce) liveRegion.textContent = segmentLabel(RUQYAH_SEGMENTS[currentIndex], currentIndex);
+    }
+
+    function fitCardText(card) {
+      if (!card) return;
+      const body = card.querySelector(".card-body");
+      if (!body) return;
+      card.classList.remove("is-fit-1", "is-fit-2", "is-fit-3", "is-fit-4", "is-fit-5");
+      for (let step = 1; step <= 5; step += 1) {
+        if (body.scrollHeight <= body.clientHeight + 1) return;
+        card.classList.remove(`is-fit-${step - 1}`);
+        card.classList.add(`is-fit-${step}`);
+      }
+    }
+
+    function fitVisibleCard() {
+      fitCardText(list.querySelector("li:not([hidden]) .surah-card"));
     }
 
     function triggerHaptic(duration) {
@@ -1446,12 +1486,16 @@
     textSizeSelect.addEventListener("change", () => {
       root.dataset.textSize = textSizeSelect.value;
       try { localStorage.setItem(textSizeStorageKey, textSizeSelect.value); } catch (_) {}
+      requestAnimationFrame(fitVisibleCard);
     });
 
     lineSpacingSelect.addEventListener("change", () => {
       root.dataset.lineSpacing = lineSpacingSelect.value;
       try { localStorage.setItem(lineSpacingStorageKey, lineSpacingSelect.value); } catch (_) {}
+      requestAnimationFrame(fitVisibleCard);
     });
+
+    addEventListener("resize", () => requestAnimationFrame(fitVisibleCard));
 
     hapticsToggle.addEventListener("click", () => {
       if (!nativeSwitchSupported && typeof navigator.vibrate === "function") navigator.vibrate(hapticDurationMs);
@@ -1523,6 +1567,7 @@
     renderSegments();
     updateInstallUi();
     registerServiceWorker();
+    document.fonts?.ready.then(() => fitVisibleCard());
   </script>
 </body>
 </html>
