@@ -45,3 +45,7 @@
 النص القرآني بالرسم العثماني مضمّن في `content.js`، والخط هو
 KFGQPC Uthman Taha Naskh. التطبيق أداة عدّ وقراءة فقط ولا يقدّم فتوى؛
 يُرجع في الأحكام إلى أهل العلم.
+
+## Native app
+
+This PWA is in maintenance mode while a native app is built; its content is generated from the packs in the athkar repository. See the [native app plan](https://github.com/t1nk333r/athkar/blob/main/NATIVE_APP_PLAN.md).

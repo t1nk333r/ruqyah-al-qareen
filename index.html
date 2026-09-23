@@ -1054,6 +1054,13 @@
         <p class="settings-note" id="install-status">يمكن تثبيت التطبيق من قائمة المتصفح عند توفر الخيار.</p>
       </section>
 
+      <section class="settings-section" aria-labelledby="backup-settings-title">
+        <h3 id="backup-settings-title">النسخة الاحتياطية</h3>
+        <p class="settings-note" id="backup-note">احفظ تقدّم اليوم وسجل الأيام والإعدادات في ملف يمكن استيراده في تطبيق الجوال. يُنشأ الملف على جهازك ولا يُرسل إلى أي خادم.</p>
+        <button class="settings-action" id="backup-export" type="button" aria-describedby="backup-note">تصدير نسخة احتياطية</button>
+        <p class="settings-note" id="backup-status" aria-live="polite"></p>
+      </section>
+
       <section class="settings-section" aria-labelledby="history-title">
         <h3 id="history-title">سجل الأيام</h3>
         <p class="settings-note" id="history-note">يُسجَّل اليوم عند اكتمال جميع المقاطع، وتبدأ رقية جديدة تلقائيًا بعد منتصف الليل.</p>
@@ -1150,6 +1157,8 @@
     const liveRegion = document.getElementById("live-region");
     const todayStatus = document.getElementById("today-status");
     const historyList = document.getElementById("history-list");
+    const backupExportButton = document.getElementById("backup-export");
+    const backupStatus = document.getElementById("backup-status");
     const motionIsReduced = matchMedia("(prefers-reduced-motion: reduce)");
     const colorScheme = matchMedia("(prefers-color-scheme: dark)");
 
@@ -1755,6 +1764,63 @@
       resetEverything();
     });
 
+    function buildBackup() {
+      ensureCurrentDay();
+      return {
+        meta: {
+          format: 1,
+          app: "ruqyah-pwa",
+          exportedAt: new Date().toISOString(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        },
+        ruqyah: {
+          today: { date: state.date, counts: { ...progress } },
+          history: Object.fromEntries(Object.entries(state.history).map(([date, entry]) => [date, { ...entry }]))
+        },
+        preferences: {
+          theme: root.dataset.theme,
+          textSize: root.dataset.textSize,
+          lineSpacing: root.dataset.lineSpacing,
+          haptics: hapticsEnabled
+        }
+      };
+    }
+
+    async function deliverBackupFile(envelope, baseName) {
+      const name = `${baseName}-${envelope.meta.exportedAt.slice(0, 10)}.athkarbackup`;
+      const file = new File([JSON.stringify(envelope, null, 2)], name, { type: "application/json" });
+      if (navigator.canShare?.({ files: [file] })) {
+        try {
+          await navigator.share({ files: [file], title: name });
+          return "shared";
+        } catch (error) {
+          if (error?.name === "AbortError") return "cancelled";
+        }
+      }
+      const url = URL.createObjectURL(file);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return "downloaded";
+    }
+
+    async function exportBackup() {
+      backupExportButton.disabled = true;
+      backupStatus.textContent = "";
+      try {
+        const outcome = await deliverBackupFile(buildBackup(), "ruqyah-backup");
+        if (outcome !== "cancelled") backupStatus.textContent = "جُهّز ملف النسخة الاحتياطية.";
+      } catch (_) {
+        backupStatus.textContent = "تعذّر تصدير النسخة الاحتياطية. حاول مرة أخرى.";
+      } finally {
+        backupExportButton.disabled = false;
+      }
+    }
+
     settingsButton.addEventListener("click", () => {
       ensureCurrentDay();
       updateInstallUi();
@@ -1762,6 +1828,7 @@
       settingsDialog.showModal();
     });
     settingsDialogClose.addEventListener("click", () => settingsDialog.close());
+    backupExportButton.addEventListener("click", exportBackup);
     settingsDialog.addEventListener("click", event => {
       if (event.target === settingsDialog) settingsDialog.close();
     });
