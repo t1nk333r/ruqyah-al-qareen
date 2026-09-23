@@ -1293,8 +1293,8 @@
       historyList.innerHTML = dates.map(date => {
         const entry = state.history[date];
         const isToday = date === state.date;
-        const time = entry ? timeFormatter.format(new Date(entry.completedAt)) : "";
-        const stateCopy = entry ? `تمت ${time}` : (isToday ? "لم تكتمل بعد" : "لم تُسجل");
+        const time = completionTime(entry);
+        const stateCopy = entry ? (time ? `تمت ${time}` : "تمت") : (isToday ? "لم تكتمل بعد" : "لم تُسجل");
         return `
           <li class="history-row${entry ? " is-complete" : ""}${isToday ? " is-today" : ""}">
             <span>${escapeHtml(isToday ? `اليوم — ${historyDateLabel(date)}` : historyDateLabel(date))}</span>
@@ -1303,10 +1303,17 @@
       }).join("");
     }
 
+    // normalizeHistory keeps any completedAt string; formatting an invalid Date throws RangeError.
+    function completionTime(entry) {
+      const completedAt = entry ? new Date(entry.completedAt) : null;
+      return completedAt && !Number.isNaN(completedAt.getTime()) ? timeFormatter.format(completedAt) : "";
+    }
+
     function updateTodayStatus() {
       const entry = state.history[state.date];
+      const time = completionTime(entry);
       todayStatus.textContent = entry
-        ? `تمت رقية اليوم في ${timeFormatter.format(new Date(entry.completedAt))}.`
+        ? (time ? `تمت رقية اليوم في ${time}.` : "تمت رقية اليوم.")
         : "رقية اليوم لم تكتمل بعد.";
     }
 
