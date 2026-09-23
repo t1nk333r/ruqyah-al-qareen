@@ -1779,11 +1779,19 @@
       return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
     }
 
+    // Date.parse rolls impossible instants over (2026-02-30T…, T24:00) instead of rejecting them; require a round trip.
+    function isRealInstant(value) {
+      if (typeof value !== "string" || !backupInstantPattern.test(value)) return false;
+      const parsed = new Date(value);
+      return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 19) === value.slice(0, 19);
+    }
+
     // normalizeHistory tolerates impossible dates and any completedAt string, and only recordToday trims to 365;
-    // the envelope must not carry either (spec/backup/envelope-v1.md in the athkar repository).
+    // the envelope must not carry either (spec/backup/envelope-v1.md in the athkar repository). Days after today
+    // (device clock moved back) are not history yet.
     function backupHistory(history) {
       const entries = Object.entries(history)
-        .filter(([date, entry]) => isRealDate(date) && backupInstantPattern.test(entry.completedAt) && !Number.isNaN(Date.parse(entry.completedAt)))
+        .filter(([date, entry]) => isRealDate(date) && date <= state.date && isRealInstant(entry.completedAt))
         .sort(([a], [b]) => b.localeCompare(a))
         .slice(0, 365);
       return Object.fromEntries(entries.map(([date, entry]) => [date, { completedAt: entry.completedAt }]));
