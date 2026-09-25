@@ -1,15 +1,16 @@
 "use strict";
 
-const CACHE_NAME = "ruqyah-static-v9";
+const CACHE_NAME = "ruqyah-static-v10";
 // Navigations are answered from the network and fall back to ./index.html, so "./" is never read from the cache.
 const APP_SHELL = [
   "./index.html",
-  "./content.js?v=3",
+  "./content.js?v=4",
   "./manifest.webmanifest?v=1",
   "./icons/icon.svg?v=1",
   "./icons/icon-192.png?v=1",
   "./icons/icon-512.png?v=1",
   "./fonts/kfgqpc-uthman-taha-naskh.ttf",
+  "./fonts/kfgqpc-hafs-v30.ttf",
 ];
 
 self.addEventListener("install", event => {

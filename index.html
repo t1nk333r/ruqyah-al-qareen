@@ -10,6 +10,7 @@
   <link rel="icon" href="./icons/icon.svg?v=1" type="image/svg+xml">
   <link rel="apple-touch-icon" href="./icons/icon-192.png?v=1">
   <link rel="preload" href="./fonts/kfgqpc-uthman-taha-naskh.ttf" as="font" type="font/ttf" crossorigin>
+  <link rel="preload" href="./fonts/kfgqpc-hafs-v30.ttf" as="font" type="font/ttf" crossorigin>
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="رقية القرين">
@@ -42,6 +43,16 @@
     @font-face {
       font-family: "KFGQPC Uthman Taha Naskh";
       src: url("./fonts/kfgqpc-uthman-taha-naskh.ttf") format("truetype");
+      font-style: normal;
+      font-weight: 400;
+      font-display: swap;
+    }
+
+    /* The ayat: Uthman Taha lacks glyphs for several Uthmani marks, and a letter set in a fallback font loses its
+       join in Safari. HAFS covers them; it reads the King Fahd Complex's encoding (kfgqpcEncoding). */
+    @font-face {
+      font-family: "KFGQPC HAFS";
+      src: url("./fonts/kfgqpc-hafs-v30.ttf") format("truetype");
       font-style: normal;
       font-weight: 400;
       font-display: swap;
@@ -401,7 +412,7 @@
     .basmala,
     .ayat {
       margin: 0;
-      font-family: "KFGQPC Uthman Taha Naskh", var(--font-arabic);
+      font-family: "KFGQPC HAFS", "KFGQPC Uthman Taha Naskh", var(--font-arabic);
       font-size: var(--quran-text-size);
       line-height: var(--quran-line-height);
       text-align: center;
@@ -431,6 +442,7 @@
     }
 
     .ayah-number {
+      font-family: "KFGQPC Uthman Taha Naskh", var(--font-arabic);
       color: var(--accent-strong);
       font-size: 0.78em;
       white-space: nowrap;
@@ -1095,7 +1107,7 @@
 
   <p class="sr-only" id="live-region" aria-live="polite"></p>
 
-  <script src="./content.js?v=3"></script>
+  <script src="./content.js?v=4"></script>
   <script>
     "use strict";
 
@@ -1343,12 +1355,48 @@
       return `المقطع ${formatNumber(index + 1)}: ${segment.surah} ${segment.range}. ${status}`;
     }
 
+    // Shadda before fatha, as the pack and the King Fahd Complex write it.
+    const BASMALA = "بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ";
+
+    // The pack stores Tanzil's Uthmani encoding; KFGQPC HAFS expects the King Fahd Complex's. Mirrors
+    // MushafEncoding.kfgqpc in the athkar repository: sukun U+0652 → U+06E1, rounded zero U+06DF → U+0652, open
+    // tanween (ً ٌ + U+06ED, ٍ + U+06E2) → U+08F0–U+08F2, iqlab (ً ٌ + U+06E2, ٍ + U+06ED) → َ ُ ِ + the meem,
+    // undotted final ya ى → ي unless a true alef maksura (after a bare fatha, or with ٰ), waqf signs join their word.
+    function kfgqpcEncoding(text) {
+      const pairs = {
+        "\u064B\u06ED": "\u08F0", "\u064C\u06ED": "\u08F1", "\u064D\u06E2": "\u08F2",
+        "\u064B\u06E2": "\u064E\u06E2", "\u064C\u06E2": "\u064F\u06E2", "\u064D\u06ED": "\u0650\u06ED",
+      };
+      const chars = Array.from(text);
+      let out = "";
+      for (let i = 0; i < chars.length; i += 1) {
+        const c = chars[i];
+        const next = chars[i + 1] ?? "";
+        if (pairs[c + next]) {
+          out += pairs[c + next];
+          i += 1;
+        } else if (c === "\u0652") {
+          out += "\u06E1";
+        } else if (c === "\u06DF") {
+          out += "\u0652";
+        } else if (c === "\u0649") {
+          const marked = next >= "\u064B" && next <= "\u0652";
+          out += next === "\u0670" || (chars[i - 1] === "\u064E" && !marked) ? "\u0649" : "\u064A";
+        } else if (c === " " && next >= "\u06D6" && next <= "\u06DC") {
+          continue;
+        } else {
+          out += c;
+        }
+      }
+      return out;
+    }
+
     function segmentMarkup(segment, index) {
       const ayat = segment.ayahs
-        .map(ayah => `${escapeHtml(ayah.text)} <span class="ayah-number">﴿${formatNumber(ayah.number)}﴾</span>`)
+        .map(ayah => `${escapeHtml(kfgqpcEncoding(ayah.text))} <span class="ayah-number">﴿${formatNumber(ayah.number)}﴾</span>`)
         .join(" ");
       const basmala = segment.basmala
-        ? '<p class="basmala">بِسْمِ ٱللَّهِ ٱلرَّحْمَٰنِ ٱلرَّحِيمِ</p>'
+        ? `<p class="basmala">${kfgqpcEncoding(BASMALA)}</p>`
         : "";
       return `
         <li hidden>
