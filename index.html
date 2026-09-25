@@ -266,13 +266,6 @@
 
     .history-row.is-complete .history-state { color: var(--completed); }
 
-    .history-empty {
-      margin: 0.85rem 0 0;
-      color: var(--text-secondary);
-      font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
-      font-size: 0.76rem;
-    }
-
     .ruqyah-list {
       position: relative;
       isolation: isolate;
@@ -1284,14 +1277,18 @@
 
     function historyDateLabel(date) {
       const [year, month, day] = date.split("-").map(Number);
-      return dateFormatter.format(new Date(year, month - 1, day));
+      const local = new Date(year, month - 1, day);
+      local.setFullYear(year); // the constructor maps years 0–99 to 1900–1999
+      return dateFormatter.format(local);
     }
 
+    // Same days the backup carries (backupHistory: real dates up to today with a real completion time), newest first.
     function updateHistoryView() {
-      const dates = Object.keys(state.history).sort().reverse().slice(0, historyLimit);
+      const history = backupHistory(state.history);
+      const dates = Object.keys(history).sort().reverse().slice(0, historyLimit);
       if (!dates.includes(state.date)) dates.unshift(state.date);
       historyList.innerHTML = dates.map(date => {
-        const entry = state.history[date];
+        const entry = history[date] ?? (date === state.date ? state.history[date] : undefined);
         const isToday = date === state.date;
         const time = completionTime(entry);
         const stateCopy = entry ? (time ? `تمت ${time}` : "تمت") : (isToday ? "لم تكتمل بعد" : "لم تُسجل");
@@ -1773,9 +1770,11 @@
 
     const backupInstantPattern = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/;
 
+    // setUTCFullYear, unlike Date.UTC, keeps years 0–99 (the athkar repository's tools/backup-validate.mjs uses the same check).
     function isRealDate(value) {
       const [year, month, day] = value.split("-").map(Number);
-      const date = new Date(Date.UTC(year, month - 1, day));
+      const date = new Date(0);
+      date.setUTCFullYear(year, month - 1, day);
       return date.getUTCFullYear() === year && date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
     }
 
@@ -1794,7 +1793,8 @@
         .filter(([date, entry]) => isRealDate(date) && date <= state.date && isRealInstant(entry.completedAt))
         .sort(([a], [b]) => b.localeCompare(a))
         .slice(0, 365);
-      return Object.fromEntries(entries.map(([date, entry]) => [date, { completedAt: entry.completedAt }]));
+      // toISOString form (milliseconds), as the native app re-exports it.
+      return Object.fromEntries(entries.map(([date, entry]) => [date, { completedAt: new Date(entry.completedAt).toISOString() }]));
     }
 
     function buildBackup() {

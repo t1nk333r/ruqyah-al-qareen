@@ -1,8 +1,8 @@
 "use strict";
 
-const CACHE_NAME = "ruqyah-static-v8";
+const CACHE_NAME = "ruqyah-static-v9";
+// Navigations are answered from the network and fall back to ./index.html, so "./" is never read from the cache.
 const APP_SHELL = [
-  "./",
   "./index.html",
   "./content.js?v=3",
   "./manifest.webmanifest?v=1",
