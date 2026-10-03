@@ -277,6 +277,16 @@
 
     .history-row.is-complete .history-state { color: var(--completed); }
 
+    /* The suras completed on a day that is not a full ruqyah day, as athkar index.html .history-suwar. */
+    .history-suwar {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+      gap: 0.25rem 0.75rem;
+    }
+
+    .history-suwar .history-state { color: var(--completed); }
+
     .ruqyah-list {
       position: relative;
       isolation: isolate;
@@ -1164,7 +1174,7 @@
 
       <section class="settings-section" aria-labelledby="history-title">
         <h3 id="history-title">سجل الأيام</h3>
-        <p class="settings-note" id="history-note">يُسجَّل اليوم عند اكتمال جميع المقاطع، وتبدأ رقية جديدة تلقائيًا بعد منتصف الليل.</p>
+        <p class="settings-note" id="history-note">يُسجَّل اليوم عند اكتمال جميع المقاطع، وإن لم يكتمل تظهر السور التي اكتملت فيه. تبدأ رقية جديدة تلقائيًا بعد منتصف الليل.</p>
         <ol class="history-list" id="history-list" aria-describedby="history-note"></ol>
       </section>
 
@@ -1200,6 +1210,18 @@
       <button id="update-apply" type="button">تحديث الآن</button>
     </span>
   </div>
+
+  <dialog class="completion-dialog" id="sura-completion-dialog" aria-labelledby="sura-completion-title" aria-describedby="sura-completion-copy">
+    <div class="completion-mark" aria-hidden="true">✓</div>
+    <div class="dialog-body">
+      <h2 id="sura-completion-title">اكتملت قراءة السورة بحمد الله</h2>
+      <p id="sura-completion-copy"></p>
+    </div>
+    <div class="dialog-actions">
+      <button class="dialog-button" id="sura-completion-close" type="button">تم</button>
+      <button class="dialog-button primary" id="sura-completion-switch" type="button">الانتقال إلى السورة التالية</button>
+    </div>
+  </dialog>
 
   <p class="sr-only" id="live-region" aria-live="polite"></p>
 
@@ -1246,6 +1268,11 @@
     const completionDialog = document.getElementById("completion-dialog");
     const completionClose = document.getElementById("completion-close");
     const completionRestart = document.getElementById("completion-restart");
+    const suraCompletionDialog = document.getElementById("sura-completion-dialog");
+    const suraCompletionTitle = document.getElementById("sura-completion-title");
+    const suraCompletionCopy = document.getElementById("sura-completion-copy");
+    const suraCompletionClose = document.getElementById("sura-completion-close");
+    const suraCompletionSwitch = document.getElementById("sura-completion-switch");
     const resetDialog = document.getElementById("reset-dialog");
     const resetDayButton = document.getElementById("reset-day");
     const resetWeekButton = document.getElementById("reset-week");
@@ -1475,20 +1502,28 @@
       return dateFormatter.format(local);
     }
 
-    // Same days the backup carries (backupHistory: real dates up to today with a real completion time), newest first.
+    // Today, then the newest 30 earlier days that are a full day (the days the backup carries, backupHistory) or have a
+    // completed sura (ruqyah-suwar-v1, not in the backup), as athkar index.html updateHistoryView. A full day shows its
+    // time; any other day lists the suras completed on it.
     function updateHistoryView() {
       const history = backupHistory(state.history);
-      const dates = Object.keys(history).sort().reverse().slice(0, historyLimit);
-      if (!dates.includes(state.date)) dates.unshift(state.date);
-      historyList.innerHTML = dates.map(date => {
-        const entry = history[date] ?? (date === state.date ? state.history[date] : undefined);
+      const pastDates = [...new Set([...Object.keys(history), ...Object.keys(suwarState.history)])]
+        .filter(date => date < state.date).sort().reverse().slice(0, historyLimit);
+      historyList.innerHTML = [state.date, ...pastDates].map(date => {
         const isToday = date === state.date;
+        const entry = history[date] ?? (isToday ? state.history[date] : undefined);
+        const suwar = RUQYAH_SUWAR.filter(sura => isToday ? suraIsComplete(sura) : Boolean(suwarState.history[date]?.[sura.id]));
         const time = completionTime(entry);
-        const stateCopy = entry ? (time ? `تمت ${time}` : "تمت") : (isToday ? "لم تكتمل بعد" : "لم تُسجل");
+        let status;
+        if (entry) status = `<span class="history-state">${escapeHtml(time ? `تمت ${time}` : "تمت")}</span>`;
+        else if (suwar.length) {
+          status = `<span class="history-suwar">${suwar.map(sura =>
+            `<span class="history-state">${escapeHtml(suraShortName(sura))} ✓</span>`).join("")}</span>`;
+        } else status = `<span class="history-state">${isToday ? "لم تكتمل بعد" : "لم تُسجل"}</span>`;
         return `
           <li class="history-row${entry ? " is-complete" : ""}${isToday ? " is-today" : ""}">
             <span>${escapeHtml(isToday ? `اليوم — ${historyDateLabel(date)}` : historyDateLabel(date))}</span>
-            <span class="history-state">${escapeHtml(stateCopy)}</span>
+            ${status}
           </li>`;
       }).join("");
     }
@@ -1746,7 +1781,8 @@
       if (completesSegment) triggerHaptic(hapticDurationMs);
       saveState();
       const sura = suraOf(segment);
-      if (completesSegment && suraIsComplete(sura) && !suwarState.completedAt[sura.id]) {
+      const completesSura = completesSegment && suraIsComplete(sura) && !suwarState.completedAt[sura.id];
+      if (completesSura) {
         suwarState.completedAt[sura.id] = new Date().toISOString();
         saveSuwarState();
       }
@@ -1762,7 +1798,21 @@
       }
 
       updateSessionProgress();
-      if (completesSegment) scheduleAdvance(sura, index);
+      if (completesSura) openSuraCompletionDialog(sura);
+      else if (completesSegment) scheduleAdvance(sura, index);
+    }
+
+    // As athkar index.html openSuraCompletionDialog, with its completion-switch button: the primary action opens the
+    // next sura in order (wrapping) that is still incomplete today. Completing the last one shows the day dialog instead.
+    function openSuraCompletionDialog(sura) {
+      const position = RUQYAH_SUWAR.indexOf(sura);
+      const next = [...RUQYAH_SUWAR.slice(position + 1), ...RUQYAH_SUWAR.slice(0, position)].find(other => !suraIsComplete(other));
+      const time = completionTime({ completedAt: suwarState.completedAt[sura.id] });
+      suraCompletionTitle.textContent = `اكتملت قراءة ${sura.surah} بحمد الله`;
+      suraCompletionCopy.textContent = time ? `وقت الإكمال: ${time}.` : "";
+      suraCompletionSwitch.dataset.sura = next.id;
+      suraCompletionSwitch.textContent = `الانتقال إلى ${next.surah}`;
+      suraCompletionDialog.showModal();
     }
 
     function askConfirmation(title, copy, onConfirm) {
@@ -1814,14 +1864,20 @@
       return `${formatNumber(count)} يومًا`;
     }
 
+    // Week and everything delete per-sura history too and count the union of both stores' dates, as athkar
+    // index.html resetWeek and resetEverything.
     function resetWeek() {
       const dates = recentDates(7);
-      const recorded = dates.filter(date => state.history[date]).length;
+      const recorded = new Set([...Object.keys(state.history), ...Object.keys(suwarState.history)]
+        .filter(date => dates.includes(date))).size;
       askConfirmation(
         "حذف سجل هذا الأسبوع؟",
         `ستُعاد عدادات اليوم، وسيُحذف ${recorded ? `سجل ${dayCountLabel(recorded)} من آخر أسبوع` : "سجل آخر سبعة أيام"}. لا يمكن التراجع.`,
         () => {
-          for (const date of dates) delete state.history[date];
+          for (const date of dates) {
+            delete state.history[date];
+            delete suwarState.history[date];
+          }
           resetDayProgress(false);
           liveRegion.textContent = "حُذف سجل آخر سبعة أيام";
         }
@@ -1829,12 +1885,13 @@
     }
 
     function resetEverything() {
-      const recorded = Object.keys(state.history).length;
+      const recorded = new Set([...Object.keys(state.history), ...Object.keys(suwarState.history)]).size;
       askConfirmation(
         "حذف كل شيء؟",
         `ستُعاد العدادات وسيُحذف السجل كاملًا${recorded ? ` (${dayCountLabel(recorded)})` : ""}. لا يمكن التراجع.`,
         () => {
           state.history = {};
+          suwarState.history = {};
           resetDayProgress(false);
           liveRegion.textContent = "حُذف السجل كاملًا";
         }
@@ -2200,6 +2257,11 @@
     completionRestart.addEventListener("click", () => {
       completionDialog.close();
       resetDayProgress(false);
+    });
+    suraCompletionClose.addEventListener("click", () => suraCompletionDialog.close());
+    suraCompletionSwitch.addEventListener("click", () => {
+      suraCompletionDialog.close();
+      selectSura(suraCompletionSwitch.dataset.sura);
     });
 
     themeSelect.addEventListener("change", () => {
