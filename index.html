@@ -1155,10 +1155,10 @@
         <h2 class="sr-only" id="session-title">تقدم رقية اليوم</h2>
         <div class="sura-picker" id="sura-picker" role="group" aria-label="اختيار السورة"></div>
         <div class="summary-row">
-          <p class="session-progress-copy" id="session-progress-copy">٠ من ٣٣ تكرارًا</p>
+          <p class="session-progress-copy" id="session-progress-copy">&nbsp;</p>
           <progress class="progress-track" id="session-progress" value="0" max="33" aria-label="تقدم رقية اليوم"></progress>
         </div>
-        <p class="today-status" id="today-status">رقية اليوم لم تكتمل بعد.</p>
+        <p class="today-status" id="today-status">&nbsp;</p>
       </section>
     </header>
 
@@ -1168,8 +1168,8 @@
         <button class="deck-button" id="previous-card" type="button" disabled>
           <span aria-hidden="true">→</span><span>السابق</span>
         </button>
-        <output class="card-position" id="card-position" aria-live="off">١ من ٧</output>
-        <button class="deck-button" id="next-card" type="button">
+        <output class="card-position" id="card-position" aria-live="off">&nbsp;</output>
+        <button class="deck-button" id="next-card" type="button" disabled>
           <span>التالي</span><span aria-hidden="true">←</span>
         </button>
       </nav>
@@ -1355,7 +1355,8 @@
     const progressStorageKey = "ruqyah-progress-v1";
     const dailyStorageKey = "ruqyah-daily-v1";
     const suwarStorageKey = "ruqyah-suwar-v1";
-    const stateLockName = "ruqyah-state";
+    const dbName = "ruqyah";
+    const dbStoreName = "state";
     const historyLimit = 30;
     const hapticsStorageKey = "ruqyah-haptics";
     const themeStorageKey = "ruqyah-theme";
@@ -1429,13 +1430,14 @@
     const dateFormatter = new Intl.DateTimeFormat("ar-EG", { weekday: "long", day: "numeric", month: "long" });
     const timeFormatter = new Intl.DateTimeFormat("ar-EG", { hour: "numeric", minute: "2-digit" });
 
-    let lastDailyRaw = null;
-    let lastSuwarRaw = null;
-    let pendingLegacyImport = false;
+    // Progress (today's counts, the day history and the per-sura state) lives in IndexedDB; see withState. These hold
+    // the last committed copy, or the whole state when the session runs in memory (storageMode "memory").
     let state = null;
     let progress = null;
     let suwarState = null;
-    readStoredState();
+    let storageMode = "idb";
+    let dbPromise = null;
+    const stateChannel = "BroadcastChannel" in window ? new BroadcastChannel("ruqyah-state") : null;
     let hapticsEnabled = true;
     try { hapticsEnabled = localStorage.getItem(hapticsStorageKey) !== "off"; } catch (_) {}
     hapticsToggle.checked = hapticsEnabled;
@@ -1488,27 +1490,16 @@
       return history;
     }
 
-    // ruqyah-daily-v1 as stored (or, when it is missing, the legacy ruqyah-progress-v1 counts), normalised to today.
-    function parseDailyState(dailyRaw, legacyRaw, today) {
-      try {
-        const raw = JSON.parse(dailyRaw || "null");
-        if (raw) {
-          const date = /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : today;
-          return {
-            daily: { date: today, counts: date === today ? normalizeCounts(raw.counts) : emptyCounts(), history: normalizeHistory(raw.history) },
-            imported: false
-          };
-        }
-        const legacy = JSON.parse(legacyRaw || "null");
-        if (legacy) return { daily: { date: today, counts: normalizeCounts(legacy), history: {} }, imported: true };
-      } catch (_) {}
-      return { daily: { date: today, counts: emptyCounts(), history: {} }, imported: false };
+    // ruqyah-daily-v1's shape normalised to today: another day's counts are dropped, its history kept.
+    function dailyFromStored(raw, today) {
+      if (!raw || typeof raw !== "object") return { date: today, counts: emptyCounts(), history: {} };
+      const date = /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : today;
+      return { date: today, counts: date === today ? normalizeCounts(raw.counts) : emptyCounts(), history: normalizeHistory(raw.history) };
     }
 
-    // Reads both keys into memory and never writes. lastDailyRaw / lastSuwarRaw keep the strings read, so a storage
-    // event that changes nothing is ignored, and persistMigrations knows what is out of date in storage.
-    function readStoredState() {
-      const today = localDateKey();
+    // The localStorage keys of earlier builds: ruqyah-daily-v1 (or, when it is missing, the legacy ruqyah-progress-v1
+    // counts) and ruqyah-suwar-v1. Read only to fill an empty database, or to start a session that cannot use it.
+    function readLocalStorageState() {
       let dailyRaw = null;
       let suwarRaw = null;
       let legacyRaw = null;
@@ -1517,19 +1508,27 @@
         suwarRaw = localStorage.getItem(suwarStorageKey);
         if (dailyRaw === null) legacyRaw = localStorage.getItem(progressStorageKey);
       } catch (_) {}
-      const { daily, imported } = parseDailyState(dailyRaw, legacyRaw, today);
-      state = daily;
-      progress = state.counts;
-      suwarState = parseSuwarState(suwarRaw);
-      lastDailyRaw = dailyRaw;
-      lastSuwarRaw = suwarRaw;
-      pendingLegacyImport = imported;
+      const parse = raw => { try { return JSON.parse(raw); } catch (_) { return null; } };
+      const legacy = parse(legacyRaw);
+      const fromLegacy = Boolean(legacy) && typeof legacy === "object";
+      return { daily: fromLegacy ? { date: localDateKey(), counts: legacy, history: {} } : parse(dailyRaw), suwar: parse(suwarRaw), fromLegacy };
     }
 
-    function saveState() {
-      state.counts = progress;
-      lastDailyRaw = JSON.stringify(state);
-      try { localStorage.setItem(dailyStorageKey, lastDailyRaw); } catch (_) {}
+    function adoptStored(daily, suwar) {
+      state = dailyFromStored(daily, localDateKey());
+      progress = state.counts;
+      suwarState = suwarFromStored(suwar);
+    }
+
+    // Earlier builds read only localStorage, so each commit is copied there, best effort; it is never read back once
+    // the database holds the state. A tab still running an earlier build reads and writes only localStorage: it sees
+    // this build's progress when it reloads (and, from 383edf9 on, through the storage event), but what it counts
+    // itself never reaches the database or the other tabs, and this build's next commit overwrites it there.
+    function mirrorToLocalStorage() {
+      try {
+        localStorage.setItem(dailyStorageKey, JSON.stringify(state));
+        localStorage.setItem(suwarStorageKey, JSON.stringify(suwarState));
+      } catch (_) {}
     }
 
     function trimHistory() {
@@ -1589,50 +1588,83 @@
       return candidate;
     }
 
-    // A missing or unreadable ruqyah-suwar-v1 is rebuilt from today's counts and recorded day.
-    function parseSuwarState(stored) {
-      let parsed = null;
-      try { parsed = JSON.parse(stored); } catch (_) {}
-      let loaded = parsed && typeof parsed === "object" ? normalizeSuwarState(parsed) : emptySuwarState();
+    // A missing or unreadable per-sura state is rebuilt from today's counts and recorded day (state must be set).
+    function suwarFromStored(raw) {
+      let loaded = raw && typeof raw === "object" ? normalizeSuwarState(raw) : emptySuwarState();
       if (loaded.date !== state.date) loaded = rollSuwarStateToDate(loaded, state.date);
       return backfillSuwarCompletions(loaded);
     }
 
-    function saveSuwarState() {
-      lastSuwarRaw = JSON.stringify(suwarState);
-      try { localStorage.setItem(suwarStorageKey, lastSuwarRaw); } catch (_) {}
+    // Database "ruqyah", object store "state", records "daily" (ruqyah-daily-v1's shape) and "suwar" (ruqyah-suwar-v1's).
+    // The connection closes when another tab needs to upgrade the database; the next operation reopens it.
+    function openDatabase() {
+      if (!dbPromise) {
+        dbPromise = new Promise((resolve, reject) => {
+          const request = indexedDB.open(dbName, 1);
+          request.onupgradeneeded = () => request.result.createObjectStore(dbStoreName);
+          request.onsuccess = () => {
+            const db = request.result;
+            db.onversionchange = () => { db.close(); dbPromise = null; };
+            db.onclose = () => { dbPromise = null; };
+            resolve(db);
+          };
+          request.onerror = () => reject(request.error);
+          request.onblocked = () => reject(new Error("IndexedDB open blocked"));
+        });
+        dbPromise.catch(() => { dbPromise = null; });
+      }
+      return dbPromise;
     }
 
-    // Writes what readStoredState only did in memory: the legacy import (ruqyah-daily-v1 first, so a reload straight
-    // after it keeps the counts, then the legacy key goes) and a normalised or rolled-over ruqyah-suwar-v1.
-    // ruqyah-daily-v1 itself is never rewritten here. Called only under the state lock (withState).
-    function persistMigrations() {
-      if (pendingLegacyImport) {
-        try {
-          localStorage.setItem(dailyStorageKey, JSON.stringify(state));
-          lastDailyRaw = JSON.stringify(state);
-          localStorage.removeItem(progressStorageKey);
-          pendingLegacyImport = false;
-        } catch (_) {}
-      }
-      if (JSON.stringify(suwarState) !== lastSuwarRaw) saveSuwarState();
+    // One transaction that reads both records and hands them to `onRead`, which may put records back. Everything
+    // happens in IndexedDB callbacks, so the transaction never waits on anything else. Rejects when it aborts.
+    function runTransaction(db, mode, onRead) {
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(dbStoreName, mode);
+        const store = tx.objectStore(dbStoreName);
+        const daily = store.get("daily");
+        const suwar = store.get("suwar");
+        suwar.onsuccess = () => {
+          try { onRead(daily.result, suwar.result, store); } catch (_) { tx.abort(); }
+        };
+        tx.oncomplete = () => resolve();
+        tx.onabort = () => reject(tx.error);
+      });
     }
 
-    // Rereads both keys and redraws, keeping the deck, focus and any pending auto-advance unless the day has changed.
-    // Never writes unless `persist` (only withState passes it). Returns whether the day changed.
-    function syncFromStorage({ persist = false } = {}) {
-      if (!persist) {
-        let daily = null;
-        let suwar = null;
-        try {
-          daily = localStorage.getItem(dailyStorageKey);
-          suwar = localStorage.getItem(suwarStorageKey);
-        } catch (_) { return false; }
-        if (daily === lastDailyRaw && suwar === lastSuwarRaw && state.date === localDateKey()) return false;
-      }
+    // First read. An empty database is filled from localStorage in that same transaction, so two tabs opening at once
+    // import once; the legacy key goes only after its counts are committed. When IndexedDB cannot be used (blocked,
+    // private mode, quota) the session runs in memory, started from localStorage when it can be read.
+    function initStore() {
+      let imported = null;
+      return openDatabase()
+        .then(db => runTransaction(db, "readwrite", (daily, suwar, store) => {
+          if (daily !== undefined) {
+            adoptStored(daily, suwar);
+            return;
+          }
+          imported = readLocalStorageState();
+          adoptStored(imported.daily, imported.suwar);
+          store.put(state, "daily");
+          store.put(suwarState, "suwar");
+        }))
+        .then(() => {
+          if (!imported?.fromLegacy) return;
+          mirrorToLocalStorage();
+          try { localStorage.removeItem(progressStorageKey); } catch (_) {}
+        })
+        .catch(() => {
+          storageMode = "memory";
+          const local = readLocalStorageState();
+          adoptStored(local.daily, local.suwar);
+        });
+    }
+
+    // Takes stored records as the state and redraws: in place on the same day (the deck, focus and any pending
+    // auto-advance stay), or from the start of the deck on a new day. Returns whether the day changed.
+    function refreshFrom(daily, suwar) {
       const previousDate = state.date;
-      readStoredState();
-      if (persist) persistMigrations();
+      adoptStored(daily, suwar);
       if (state.date !== previousDate) {
         startNewDay();
         return true;
@@ -1644,21 +1676,39 @@
       return false;
     }
 
-    // Every write of ruqyah-daily-v1 and ruqyah-suwar-v1 goes through here. Under one Web Lock shared by every tab of
-    // the app it rereads both keys, writes any pending migration, then applies `operation` to that fresh state, which
-    // saves what it changes: two tabs' read-change-write sequences never interleave, so neither writes a stale copy.
-    // Where navigator.locks is missing the reread and the write still run back to back in one task, which narrows the
-    // race with another tab but cannot close it; builds before this one do not take the lock either.
+    // Every change to progress (counting with its day and sura completions, the resets, rollover) is one operation
+    // here. In IndexedDB it is a single readwrite transaction that rereads both records, applies `operation` to them
+    // (changing memory and the page) and puts the result; the browser runs such transactions one at a time across
+    // tabs, so none works on a stale copy. Other tabs hear of each commit on the BroadcastChannel. If the database
+    // fails, the session carries on in memory, which is then never replaced by a read.
     function withState(operation, { skipOnNewDay = false } = {}) {
-      const run = () => {
-        const newDay = syncFromStorage({ persist: true });
-        if (newDay) saveState();
-        if (newDay && skipOnNewDay) return;
-        operation();
+      let applied = false;
+      const apply = (daily, suwar) => {
+        applied = true;
+        const newDay = refreshFrom(daily, suwar);
+        if (!(newDay && skipOnNewDay)) operation();
+        state.counts = progress;
       };
-      if (navigator.locks?.request) return navigator.locks.request(stateLockName, run).catch(() => {});
-      run();
-      return Promise.resolve();
+      const inMemory = () => {
+        storageMode = "memory";
+        if (!applied) apply(state, suwarState);
+        mirrorToLocalStorage();
+      };
+      if (storageMode === "memory") {
+        inMemory();
+        return Promise.resolve();
+      }
+      return openDatabase()
+        .then(db => runTransaction(db, "readwrite", (daily, suwar, store) => {
+          apply(daily, suwar);
+          store.put(state, "daily");
+          store.put(suwarState, "suwar");
+        }))
+        .then(() => {
+          mirrorToLocalStorage();
+          stateChannel?.postMessage("changed");
+        })
+        .catch(inMemory);
     }
 
     function todayIsRecorded() {
@@ -1669,7 +1719,6 @@
       if (todayIsRecorded()) return false;
       state.history[state.date] = { completedAt: new Date().toISOString() };
       trimHistory();
-      saveState();
       return true;
     }
 
@@ -1683,11 +1732,11 @@
       liveRegion.textContent = "بدأ يوم جديد، وأعيدت عدادات الرقية.";
     }
 
-    // On the midnight timer, focus and visibility: today's state in memory at once, written under the lock.
+    // On the midnight timer, focus and visibility: the new day in memory and on the page at once, then committed.
     function ensureCurrentDay() {
-      if (state.date === localDateKey()) return false;
-      syncFromStorage();
-      withState(() => saveState());
+      if (!state || state.date === localDateKey()) return false;
+      refreshFrom(state, suwarState);
+      withState(() => {});
       return true;
     }
 
@@ -1712,6 +1761,7 @@
     // completed sura (ruqyah-suwar-v1, not in the backup), as athkar index.html updateHistoryView. A full day shows its
     // time; any other day lists the suras completed on it.
     function updateHistoryView() {
+      if (!state) return;
       const history = backupHistory(state.history);
       const pastDates = [...new Set([...Object.keys(history), ...Object.keys(suwarState.history)])]
         .filter(date => date < state.date).sort().reverse().slice(0, historyLimit);
@@ -1996,13 +2046,9 @@
       progress[segment.id] = next;
       const completesSegment = next >= segment.repeat;
       if (completesSegment) triggerHaptic(hapticDurationMs);
-      saveState();
       const sura = suraOf(segment);
       const completesSura = completesSegment && suraIsComplete(sura) && !suwarState.completedAt[sura.id];
-      if (completesSura) {
-        suwarState.completedAt[sura.id] = new Date().toISOString();
-        saveSuwarState();
-      }
+      if (completesSura) suwarState.completedAt[sura.id] = new Date().toISOString();
       updateCard(segment, index, true);
       updateDeckNavigation();
 
@@ -2045,9 +2091,7 @@
       if (!countFor(segment)) return;
       askConfirmation("إعادة العداد؟", `سيعود عداد ${segment.surah} ${segment.range} إلى الصفر.`, () => withState(() => {
         progress[segment.id] = 0;
-        saveState();
         suwarState.completedAt[suraOf(segment).id] = null;
-        saveSuwarState();
         updateCard(segment, index, true);
         updateDeckNavigation();
         updateSessionProgress();
@@ -2059,12 +2103,10 @@
       withState(() => clearDayProgress(announce));
     }
 
-    // Runs inside withState only (the lock is not reentrant).
+    // Runs inside a withState operation only.
     function clearDayProgress(announce) {
       for (const segment of segments) progress[segment.id] = 0;
-      saveState();
       for (const sura of RUQYAH_SUWAR) suwarState.completedAt[sura.id] = null;
-      saveSuwarState();
       suraIndices = {};
       selectSura(RUQYAH_SUWAR[0].id, true, "back");
       updateHistoryView();
@@ -2262,6 +2304,7 @@
     // The shown sura's segments, as athkar index.html renderSuraPages: opens on its first incomplete segment (0 when
     // the sura is complete) unless a card was already shown in it since the page opened.
     function renderSuraDeck(direction = "forward") {
+      if (!state) return;
       const sura = selectedSura();
       if (!Number.isInteger(suraIndices[sura.id])) suraIndices[sura.id] = firstIncompleteIndex(sura);
       list.innerHTML = sura.segments.map(segmentMarkup).join("");
@@ -2284,7 +2327,7 @@
 
     function renderSuraPicker() {
       suraPicker.innerHTML = RUQYAH_SUWAR.map(sura => `
-        <button class="sura-chip" type="button" data-sura="${escapeHtml(sura.id)}" aria-pressed="false">${escapeHtml(suraShortName(sura))}<span class="sura-chip-status" aria-hidden="true"></span></button>`).join("");
+        <button class="sura-chip" type="button" data-sura="${escapeHtml(sura.id)}" aria-pressed="${sura.id === selectedSuraId}">${escapeHtml(suraShortName(sura))}<span class="sura-chip-status" aria-hidden="true"></span></button>`).join("");
     }
 
     // as athkar index.html updateSuraPicker; ✓ when every segment of the sura is complete today.
@@ -2571,8 +2614,13 @@
       selectSura(suraCompletionSwitch.dataset.sura);
       focusShownCard();
     });
-    addEventListener("storage", event => {
-      if (event.key === null || event.key === dailyStorageKey || event.key === suwarStorageKey) syncFromStorage();
+    // Another tab committed a change: reread it (read-only) and redraw as refreshFrom does. A session in memory keeps
+    // its own state.
+    stateChannel?.addEventListener("message", () => {
+      if (storageMode !== "idb" || !state) return;
+      openDatabase()
+        .then(db => runTransaction(db, "readonly", (daily, suwar) => refreshFrom(daily, suwar)))
+        .catch(() => {});
     });
 
     themeSelect.addEventListener("change", () => {
@@ -2677,15 +2725,17 @@
     lineSpacingSelect.value = root.dataset.lineSpacing || "comfortable";
     applyTheme(themeSelect.value);
     if (location.hash && !suraIdFromHash()) history.replaceState(null, "", `#${selectedSuraId}`);
+    // The deck is drawn after the first read of the stored progress, so no wrong count is ever shown.
     renderSuraPicker();
-    renderSuraDeck();
-    withState(() => {});
-    updateHistoryView();
+    initStore().then(() => {
+      renderSuraDeck();
+      updateHistoryView();
+      scheduleDayRollover();
+    });
     updateInstallUi();
     registerServiceWorker();
     addEventListener("load", () => scheduleFirstUseInstallPrompt(2600), { once: true });
     document.fonts?.ready.then(() => fitVisibleCard());
-    scheduleDayRollover();
     addEventListener("visibilitychange", () => {
       if (document.visibilityState === "visible") ensureCurrentDay();
     });
