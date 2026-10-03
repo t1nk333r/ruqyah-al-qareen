@@ -1355,6 +1355,7 @@
     const progressStorageKey = "ruqyah-progress-v1";
     const dailyStorageKey = "ruqyah-daily-v1";
     const suwarStorageKey = "ruqyah-suwar-v1";
+    const stateLockName = "ruqyah-state";
     const historyLimit = 30;
     const hapticsStorageKey = "ruqyah-haptics";
     const themeStorageKey = "ruqyah-theme";
@@ -1430,9 +1431,11 @@
 
     let lastDailyRaw = null;
     let lastSuwarRaw = null;
-    let state = loadState();
-    let progress = state.counts;
-    let suwarState = loadSuwarState();
+    let pendingLegacyImport = false;
+    let state = null;
+    let progress = null;
+    let suwarState = null;
+    readStoredState();
     let hapticsEnabled = true;
     try { hapticsEnabled = localStorage.getItem(hapticsStorageKey) !== "off"; } catch (_) {}
     hapticsToggle.checked = hapticsEnabled;
@@ -1485,35 +1488,42 @@
       return history;
     }
 
-    // lastDailyRaw / lastSuwarRaw: the stored strings this tab last read or wrote, so syncFromStorage can tell when
-    // another tab has written.
-    function loadState() {
-      const today = localDateKey();
+    // ruqyah-daily-v1 as stored (or, when it is missing, the legacy ruqyah-progress-v1 counts), normalised to today.
+    function parseDailyState(dailyRaw, legacyRaw, today) {
       try {
-        const stored = localStorage.getItem(dailyStorageKey);
-        lastDailyRaw = stored;
-        const raw = JSON.parse(stored || "null");
+        const raw = JSON.parse(dailyRaw || "null");
         if (raw) {
           const date = /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : today;
           return {
-            date: today,
-            counts: date === today ? normalizeCounts(raw.counts) : emptyCounts(),
-            history: normalizeHistory(raw.history)
+            daily: { date: today, counts: date === today ? normalizeCounts(raw.counts) : emptyCounts(), history: normalizeHistory(raw.history) },
+            imported: false
           };
         }
-        const legacy = JSON.parse(localStorage.getItem(progressStorageKey) || "null");
-        if (legacy) {
-          // Saved before the legacy key goes, so a reload straight after the import keeps the counts.
-          const imported = { date: today, counts: normalizeCounts(legacy), history: {} };
-          try {
-            localStorage.setItem(dailyStorageKey, JSON.stringify(imported));
-            lastDailyRaw = JSON.stringify(imported);
-            localStorage.removeItem(progressStorageKey);
-          } catch (_) {}
-          return imported;
-        }
+        const legacy = JSON.parse(legacyRaw || "null");
+        if (legacy) return { daily: { date: today, counts: normalizeCounts(legacy), history: {} }, imported: true };
       } catch (_) {}
-      return { date: today, counts: emptyCounts(), history: {} };
+      return { daily: { date: today, counts: emptyCounts(), history: {} }, imported: false };
+    }
+
+    // Reads both keys into memory and never writes. lastDailyRaw / lastSuwarRaw keep the strings read, so a storage
+    // event that changes nothing is ignored, and persistMigrations knows what is out of date in storage.
+    function readStoredState() {
+      const today = localDateKey();
+      let dailyRaw = null;
+      let suwarRaw = null;
+      let legacyRaw = null;
+      try {
+        dailyRaw = localStorage.getItem(dailyStorageKey);
+        suwarRaw = localStorage.getItem(suwarStorageKey);
+        if (dailyRaw === null) legacyRaw = localStorage.getItem(progressStorageKey);
+      } catch (_) {}
+      const { daily, imported } = parseDailyState(dailyRaw, legacyRaw, today);
+      state = daily;
+      progress = state.counts;
+      suwarState = parseSuwarState(suwarRaw);
+      lastDailyRaw = dailyRaw;
+      lastSuwarRaw = suwarRaw;
+      pendingLegacyImport = imported;
     }
 
     function saveState() {
@@ -1579,23 +1589,13 @@
       return candidate;
     }
 
-    // A missing or unreadable ruqyah-suwar-v1 is rebuilt from ruqyah-daily-v1, which is only read here, never written.
-    function loadSuwarState() {
-      let stored = null;
+    // A missing or unreadable ruqyah-suwar-v1 is rebuilt from today's counts and recorded day.
+    function parseSuwarState(stored) {
       let parsed = null;
-      try {
-        stored = localStorage.getItem(suwarStorageKey);
-        parsed = JSON.parse(stored);
-      } catch (_) {}
-      lastSuwarRaw = stored;
+      try { parsed = JSON.parse(stored); } catch (_) {}
       let loaded = parsed && typeof parsed === "object" ? normalizeSuwarState(parsed) : emptySuwarState();
       if (loaded.date !== state.date) loaded = rollSuwarStateToDate(loaded, state.date);
-      backfillSuwarCompletions(loaded);
-      if (JSON.stringify(loaded) !== stored) {
-        lastSuwarRaw = JSON.stringify(loaded);
-        try { localStorage.setItem(suwarStorageKey, lastSuwarRaw); } catch (_) {}
-      }
-      return loaded;
+      return backfillSuwarCompletions(loaded);
     }
 
     function saveSuwarState() {
@@ -1603,23 +1603,62 @@
       try { localStorage.setItem(suwarStorageKey, lastSuwarRaw); } catch (_) {}
     }
 
-    // Another tab of the app shares both keys. When either changed since this tab last read or wrote it, reload both
-    // and redraw, so this tab never writes over the other's counts or deletes its record. Run before every write
-    // (through ensureCurrentDay and the reset actions) and on the storage event.
-    function syncFromStorage() {
-      let daily = null;
-      let suwar = null;
-      try {
-        daily = localStorage.getItem(dailyStorageKey);
-        suwar = localStorage.getItem(suwarStorageKey);
-      } catch (_) { return false; }
-      if (daily === lastDailyRaw && suwar === lastSuwarRaw) return false;
-      state = loadState();
-      progress = state.counts;
-      suwarState = loadSuwarState();
-      renderSuraDeck(null);
+    // Writes what readStoredState only did in memory: the legacy import (ruqyah-daily-v1 first, so a reload straight
+    // after it keeps the counts, then the legacy key goes) and a normalised or rolled-over ruqyah-suwar-v1.
+    // ruqyah-daily-v1 itself is never rewritten here. Called only under the state lock (withState).
+    function persistMigrations() {
+      if (pendingLegacyImport) {
+        try {
+          localStorage.setItem(dailyStorageKey, JSON.stringify(state));
+          lastDailyRaw = JSON.stringify(state);
+          localStorage.removeItem(progressStorageKey);
+          pendingLegacyImport = false;
+        } catch (_) {}
+      }
+      if (JSON.stringify(suwarState) !== lastSuwarRaw) saveSuwarState();
+    }
+
+    // Rereads both keys and redraws, keeping the deck, focus and any pending auto-advance unless the day has changed.
+    // Never writes unless `persist` (only withState passes it). Returns whether the day changed.
+    function syncFromStorage({ persist = false } = {}) {
+      if (!persist) {
+        let daily = null;
+        let suwar = null;
+        try {
+          daily = localStorage.getItem(dailyStorageKey);
+          suwar = localStorage.getItem(suwarStorageKey);
+        } catch (_) { return false; }
+        if (daily === lastDailyRaw && suwar === lastSuwarRaw && state.date === localDateKey()) return false;
+      }
+      const previousDate = state.date;
+      readStoredState();
+      if (persist) persistMigrations();
+      if (state.date !== previousDate) {
+        startNewDay();
+        return true;
+      }
+      selectedSura().segments.forEach((segment, index) => updateCard(segment, index));
+      updateDeckNavigation();
+      updateSessionProgress();
       updateHistoryView();
-      return true;
+      return false;
+    }
+
+    // Every write of ruqyah-daily-v1 and ruqyah-suwar-v1 goes through here. Under one Web Lock shared by every tab of
+    // the app it rereads both keys, writes any pending migration, then applies `operation` to that fresh state, which
+    // saves what it changes: two tabs' read-change-write sequences never interleave, so neither writes a stale copy.
+    // Where navigator.locks is missing the reread and the write still run back to back in one task, which narrows the
+    // race with another tab but cannot close it; builds before this one do not take the lock either.
+    function withState(operation, { skipOnNewDay = false } = {}) {
+      const run = () => {
+        const newDay = syncFromStorage({ persist: true });
+        if (newDay) saveState();
+        if (newDay && skipOnNewDay) return;
+        operation();
+      };
+      if (navigator.locks?.request) return navigator.locks.request(stateLockName, run).catch(() => {});
+      run();
+      return Promise.resolve();
     }
 
     function todayIsRecorded() {
@@ -1634,25 +1673,21 @@
       return true;
     }
 
-    function ensureCurrentDay() {
-      const today = localDateKey();
-      const rolled = state.date !== today || suwarState.date !== today;
-      syncFromStorage();
-      if (!rolled) return false;
-      if (state.date !== today) {
-        state.date = today;
-        progress = emptyCounts();
-        state.counts = progress;
-        saveState();
-      }
-      if (suwarState.date !== today) {
-        suwarState = rollSuwarStateToDate(suwarState, today);
-        saveSuwarState();
-      }
+    // A new local day: the shown sura reopens at its first incomplete segment (all of them, as counts are zero).
+    function startNewDay() {
+      const hadFocus = list.contains(document.activeElement);
       suraIndices = {};
       renderSuraDeck("back");
       updateHistoryView();
+      if (hadFocus) focusShownCard();
       liveRegion.textContent = "بدأ يوم جديد، وأعيدت عدادات الرقية.";
+    }
+
+    // On the midnight timer, focus and visibility: today's state in memory at once, written under the lock.
+    function ensureCurrentDay() {
+      if (state.date === localDateKey()) return false;
+      syncFromStorage();
+      withState(() => saveState());
       return true;
     }
 
@@ -1950,8 +1985,12 @@
       list.querySelector("li:not([hidden]) .card-tap-target")?.focus({ preventScroll: true });
     }
 
+    // A tap that finds a new day starts it and is not counted.
     function countReading(segment, index) {
-      if (ensureCurrentDay()) return;
+      withState(() => recordReading(segment, index), { skipOnNewDay: true });
+    }
+
+    function recordReading(segment, index) {
       if (isComplete(segment)) return;
       const next = countFor(segment) + 1;
       progress[segment.id] = next;
@@ -2004,8 +2043,7 @@
 
     function resetSegment(segment, index) {
       if (!countFor(segment)) return;
-      askConfirmation("إعادة العداد؟", `سيعود عداد ${segment.surah} ${segment.range} إلى الصفر.`, () => {
-        syncFromStorage();
+      askConfirmation("إعادة العداد؟", `سيعود عداد ${segment.surah} ${segment.range} إلى الصفر.`, () => withState(() => {
         progress[segment.id] = 0;
         saveState();
         suwarState.completedAt[suraOf(segment).id] = null;
@@ -2013,12 +2051,16 @@
         updateCard(segment, index, true);
         updateDeckNavigation();
         updateSessionProgress();
-      });
+      }));
     }
 
     // Today's counts and sura completions; the day's history record stays (spec §8). A new ruqyah starts at ق.
     function resetDayProgress(announce = true) {
-      syncFromStorage();
+      withState(() => clearDayProgress(announce));
+    }
+
+    // Runs inside withState only (the lock is not reentrant).
+    function clearDayProgress(announce) {
       for (const segment of segments) progress[segment.id] = 0;
       saveState();
       for (const sura of RUQYAH_SUWAR) suwarState.completedAt[sura.id] = null;
@@ -2059,15 +2101,14 @@
       askConfirmation(
         "حذف سجل هذا الأسبوع؟",
         `ستُعاد عدادات اليوم، وسيُحذف ${recorded ? `سجل ${dayCountLabel(recorded)} من آخر أسبوع` : "سجل آخر سبعة أيام"}. لا يمكن التراجع.`,
-        () => {
-          syncFromStorage();
+        () => withState(() => {
           for (const date of dates) {
             delete state.history[date];
             delete suwarState.history[date];
           }
-          resetDayProgress(false);
+          clearDayProgress(false);
           liveRegion.textContent = "حُذف سجل آخر سبعة أيام";
-        }
+        })
       );
     }
 
@@ -2076,13 +2117,12 @@
       askConfirmation(
         "حذف كل شيء؟",
         `ستُعاد العدادات وسيُحذف السجل كاملًا${recorded ? ` (${dayCountLabel(recorded)})` : ""}. لا يمكن التراجع.`,
-        () => {
-          syncFromStorage();
+        () => withState(() => {
           state.history = {};
           suwarState.history = {};
-          resetDayProgress(false);
+          clearDayProgress(false);
           liveRegion.textContent = "حُذف السجل كاملًا";
-        }
+        })
       );
     }
 
@@ -2639,6 +2679,7 @@
     if (location.hash && !suraIdFromHash()) history.replaceState(null, "", `#${selectedSuraId}`);
     renderSuraPicker();
     renderSuraDeck();
+    withState(() => {});
     updateHistoryView();
     updateInstallUi();
     registerServiceWorker();
