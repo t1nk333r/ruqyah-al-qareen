@@ -238,7 +238,7 @@
       font-weight: 700;
     }
 
-    .session-summary.is-complete .today-status { color: var(--completed); }
+    .today-status.is-complete { color: var(--completed); }
 
     .history-list {
       display: grid;
@@ -280,8 +280,8 @@
     .ruqyah-list {
       position: relative;
       isolation: isolate;
-      block-size: clamp(30rem, 68vh, 38rem);
-      block-size: clamp(30rem, 68svh, 38rem);
+      block-size: clamp(27rem, 62vh, 38rem);
+      block-size: clamp(27rem, 62svh, 38rem);
       margin: 1rem 0 1.35rem;
       padding: 0 0 1rem;
       list-style: none;
@@ -899,6 +899,65 @@
       to { opacity: 1; transform: translateX(0) scale(1); }
     }
 
+    .skip-link {
+      position: fixed;
+      inset-block-start: 0.5rem;
+      inset-inline-start: 0.5rem;
+      z-index: 100;
+      padding: 0.7rem 1rem;
+      border-radius: 0.75rem;
+      background: var(--text-primary);
+      color: var(--surface);
+      transform: translateY(-150%);
+      transition: transform 120ms ease;
+    }
+
+    .skip-link:focus { transform: translateY(0); }
+
+    /* One chip per sura, as athkar index.html .sura-picker / .sura-chip, except that chips grow from their content
+       width rather than taking equal shares: «ق» and «الكافرون ✓» differ far more than athkar's sura names. */
+    .sura-picker {
+      display: flex;
+      gap: 0.3rem;
+      margin-block-end: 0.45rem;
+    }
+
+    .sura-chip {
+      display: inline-flex;
+      flex: 1 1 auto;
+      min-width: 0;
+      min-height: 2.3rem;
+      align-items: center;
+      justify-content: center;
+      gap: 0.25rem;
+      padding: 0.2rem 0.4rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: var(--surface-raised);
+      color: var(--text-secondary);
+      font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
+      font-size: 0.82rem;
+      font-weight: 800;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease, transform 100ms ease;
+    }
+
+    .sura-chip:active { transform: scale(0.97); }
+
+    .sura-chip[aria-pressed="true"] {
+      border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+      background: var(--accent-soft);
+      color: var(--accent-strong);
+    }
+
+    .sura-chip-status { color: var(--completed); }
+    .sura-chip-status:empty { display: none; }
+
+    @media (max-width: 21rem) {
+      .sura-chip { gap: 0.1rem; padding-inline: 0.25rem; font-size: 0.76rem; }
+    }
+
     @media (max-width: 30rem) {
       .settings-grid { grid-template-columns: 1fr; }
       .icon-button .button-label { display: none; }
@@ -952,6 +1011,7 @@
   </script>
 </head>
 <body>
+  <a class="skip-link" href="#ruqyah-list">تخطَّ إلى الرقية</a>
   <div class="app-shell">
     <header>
       <div class="brand-row">
@@ -973,6 +1033,7 @@
 
       <section class="session-summary" id="session-summary" aria-labelledby="session-title">
         <h2 class="sr-only" id="session-title">تقدم رقية اليوم</h2>
+        <div class="sura-picker" id="sura-picker" role="group" aria-label="اختيار السورة"></div>
         <div class="summary-row">
           <p class="session-progress-copy" id="session-progress-copy">٠ من ٣٣ تكرارًا</p>
           <progress class="progress-track" id="session-progress" value="0" max="33" aria-label="تقدم رقية اليوم"></progress>
@@ -982,7 +1043,7 @@
     </header>
 
     <main id="main-content">
-      <ol class="ruqyah-list" id="ruqyah-list" aria-label="مقاطع رقية القرين"></ol>
+      <ol class="ruqyah-list" id="ruqyah-list" aria-label="مقاطع رقية القرين" tabindex="-1"></ol>
       <nav class="deck-navigation" aria-label="التنقل بين مقاطع الرقية">
         <button class="deck-button" id="previous-card" type="button" disabled>
           <span aria-hidden="true">→</span><span>السابق</span>
@@ -1148,6 +1209,7 @@
 
     const progressStorageKey = "ruqyah-progress-v1";
     const dailyStorageKey = "ruqyah-daily-v1";
+    const suwarStorageKey = "ruqyah-suwar-v1";
     const historyLimit = 30;
     const hapticsStorageKey = "ruqyah-haptics";
     const themeStorageKey = "ruqyah-theme";
@@ -1164,6 +1226,7 @@
     const nextCardButton = document.getElementById("next-card");
     const cardPosition = document.getElementById("card-position");
     const sessionSummary = document.getElementById("session-summary");
+    const suraPicker = document.getElementById("sura-picker");
     const progressCopy = document.getElementById("session-progress-copy");
     const progressBar = document.getElementById("session-progress");
     const sessionReset = document.getElementById("session-reset");
@@ -1202,6 +1265,7 @@
     const motionIsReduced = matchMedia("(prefers-reduced-motion: reduce)");
     const colorScheme = matchMedia("(prefers-color-scheme: dark)");
 
+    const suraById = Object.fromEntries(RUQYAH_SUWAR.map(sura => [sura.id, sura]));
     const segments = RUQYAH_SUWAR.flatMap(sura => sura.segments);
     const totalRepeats = segments.reduce((sum, segment) => sum + segment.repeat, 0);
 
@@ -1210,11 +1274,15 @@
 
     let state = loadState();
     let progress = state.counts;
+    let suwarState = loadSuwarState();
     let hapticsEnabled = true;
     try { hapticsEnabled = localStorage.getItem(hapticsStorageKey) !== "off"; } catch (_) {}
     hapticsToggle.checked = hapticsEnabled;
 
-    let currentIndex = firstIncompleteIndex();
+    // With no sura in the hash the app always opens on the first sura (ق); the last sura shown is not remembered.
+    let selectedSuraId = suraIdFromHash() ?? RUQYAH_SUWAR[0].id;
+    // Card shown per sura while the page is open; unset opens the sura's first incomplete segment (0 when complete).
+    let suraIndices = {};
     let pendingConfirmation = null;
     let deferredInstallPrompt = null;
     let waitingWorker = null;
@@ -1287,6 +1355,78 @@
       while (dates.length > 365) delete state.history[dates.shift()];
     }
 
+    // ruqyah-suwar-v1, as athkar-suwar-v1 (athkar index.html emptySuwarState … saveSuwarState) without `read` and
+    // `selected`: today's counts stay in ruqyah-daily-v1, and the app always opens on the first sura. `completedAt`
+    // is when each sura was completed today; `history` maps each earlier local date to the suras completed on it
+    // ({ suraId: completedAt }), newest 30. Not in the backup (its ruqyah object is closed), as athkar-suwar-v1 is not.
+    function emptySuwarState(date = state.date) {
+      return { date, completedAt: Object.fromEntries(RUQYAH_SUWAR.map(sura => [sura.id, null])), history: {} };
+    }
+
+    function normalizeSuwarState(parsed) {
+      const date = typeof parsed.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date) ? parsed.date : state.date;
+      const normalized = emptySuwarState(date);
+      const completedAt = parsed.completedAt && typeof parsed.completedAt === "object" ? parsed.completedAt : {};
+      for (const sura of RUQYAH_SUWAR) {
+        const at = Object.hasOwn(completedAt, sura.id) ? completedAt[sura.id] : null;
+        // Today's counts can confirm only today's completions; an earlier day's move into history as stored.
+        if (typeof at === "string" && (date !== state.date || suraIsComplete(sura))) normalized.completedAt[sura.id] = at;
+      }
+      const history = parsed.history && typeof parsed.history === "object" ? parsed.history : {};
+      for (const [day, entry] of Object.entries(history)) {
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day >= date || !entry || typeof entry !== "object") continue;
+        const completed = Object.fromEntries(Object.entries(entry)
+          .filter(([id, at]) => Object.hasOwn(suraById, id) && typeof at === "string"));
+        if (Object.keys(completed).length) normalized.history[day] = completed;
+      }
+      normalized.history = trimSuwarHistory(normalized.history);
+      return normalized;
+    }
+
+    function trimSuwarHistory(history) {
+      const kept = Object.keys(history).sort().reverse().slice(0, historyLimit);
+      return Object.fromEntries(kept.map(day => [day, history[day]]));
+    }
+
+    function rollSuwarStateToDate(candidate, nextDate) {
+      const completed = Object.fromEntries(Object.entries(candidate.completedAt).filter(([, at]) => at));
+      const history = { ...candidate.history };
+      if (Object.keys(completed).length) history[candidate.date] = completed;
+      return { ...emptySuwarState(nextDate), history: trimSuwarHistory(history) };
+    }
+
+    // A sura complete by today's counts but without an instant (counted by an older build, or migrated from
+    // ruqyah-daily-v1) takes today's recorded completion time when there is one; no instant is ever invented.
+    function backfillSuwarCompletions(candidate) {
+      const recorded = state.history[state.date]?.completedAt;
+      if (!recorded) return candidate;
+      for (const sura of RUQYAH_SUWAR) {
+        if (!candidate.completedAt[sura.id] && suraIsComplete(sura)) candidate.completedAt[sura.id] = recorded;
+      }
+      return candidate;
+    }
+
+    // A missing or unreadable ruqyah-suwar-v1 is rebuilt from ruqyah-daily-v1, which is only read here, never written.
+    function loadSuwarState() {
+      let stored = null;
+      let parsed = null;
+      try {
+        stored = localStorage.getItem(suwarStorageKey);
+        parsed = JSON.parse(stored);
+      } catch (_) {}
+      let loaded = parsed && typeof parsed === "object" ? normalizeSuwarState(parsed) : emptySuwarState();
+      if (loaded.date !== state.date) loaded = rollSuwarStateToDate(loaded, state.date);
+      backfillSuwarCompletions(loaded);
+      if (JSON.stringify(loaded) !== stored) {
+        try { localStorage.setItem(suwarStorageKey, JSON.stringify(loaded)); } catch (_) {}
+      }
+      return loaded;
+    }
+
+    function saveSuwarState() {
+      try { localStorage.setItem(suwarStorageKey, JSON.stringify(suwarState)); } catch (_) {}
+    }
+
     function todayIsRecorded() {
       return Boolean(state.history[state.date]);
     }
@@ -1301,14 +1441,19 @@
 
     function ensureCurrentDay() {
       const today = localDateKey();
-      if (state.date === today) return false;
-      state.date = today;
-      progress = emptyCounts();
-      state.counts = progress;
-      saveState();
-      segments.forEach((segment, index) => updateCard(segment, index));
-      updateSessionProgress();
-      showCard(0, "back");
+      if (state.date === today && suwarState.date === today) return false;
+      if (state.date !== today) {
+        state.date = today;
+        progress = emptyCounts();
+        state.counts = progress;
+        saveState();
+      }
+      if (suwarState.date !== today) {
+        suwarState = rollSuwarStateToDate(suwarState, today);
+        saveSuwarState();
+      }
+      suraIndices = {};
+      renderSuraDeck("back");
       liveRegion.textContent = "بدأ يوم جديد، وأعيدت عدادات الرقية.";
       return true;
     }
@@ -1354,21 +1499,37 @@
       return completedAt && !Number.isNaN(completedAt.getTime()) ? timeFormatter.format(completedAt) : "";
     }
 
-    function updateTodayStatus() {
+    function updateTodayStatus(done) {
       const entry = state.history[state.date];
       const time = completionTime(entry);
       todayStatus.textContent = entry
         ? (time ? `تمت رقية اليوم في ${time}.` : "تمت رقية اليوم.")
-        : "رقية اليوم لم تكتمل بعد.";
+        : `رقية اليوم: ${formatNumber(done)} من ${formatNumber(totalRepeats)} تكرارًا`;
+      todayStatus.classList.toggle("is-complete", Boolean(entry));
     }
 
     function countFor(segment) { return progress[segment.id] ?? 0; }
     function isComplete(segment) { return countFor(segment) >= segment.repeat; }
     function allComplete() { return segments.every(isComplete); }
+    function suraIsComplete(sura) { return sura.segments.every(isComplete); }
+    function suraOf(segment) { return suraById[segment.id.slice(0, segment.id.indexOf("-"))]; }
+    function selectedSura() { return suraById[selectedSuraId]; }
+    function activeSegments() { return selectedSura().segments; }
+    function activeIndex() { return suraIndices[selectedSuraId] ?? 0; }
 
-    function firstIncompleteIndex() {
-      const index = segments.findIndex(segment => !isComplete(segment));
+    // as athkar index.html suraShortName
+    function suraShortName(sura) {
+      return sura.surah.replace(/^سورة /, "");
+    }
+
+    function firstIncompleteIndex(sura) {
+      const index = sura.segments.findIndex(segment => !isComplete(segment));
       return index === -1 ? 0 : index;
+    }
+
+    function suraIdFromHash(hash = location.hash) {
+      const name = hash.slice(1);
+      return Object.hasOwn(suraById, name) ? name : null;
     }
 
     function escapeHtml(value) {
@@ -1483,26 +1644,43 @@
       if (announce) liveRegion.textContent = label;
     }
 
+    // The summary row follows the shown sura; today-status keeps the whole day (all suras, spec §7).
     function updateSessionProgress() {
+      const sura = selectedSura();
+      const suraDone = sura.segments.reduce((sum, segment) => sum + countFor(segment), 0);
+      const suraTotal = sura.segments.reduce((sum, segment) => sum + segment.repeat, 0);
       const done = segments.reduce((sum, segment) => sum + countFor(segment), 0);
-      progressBar.max = totalRepeats;
-      progressBar.value = done;
-      progressCopy.textContent = `${formatNumber(done)} من ${formatNumber(totalRepeats)} تكرارًا`;
-      sessionSummary.classList.toggle("is-complete", todayIsRecorded() || done >= totalRepeats);
-      sessionReset.disabled = done === 0 && Object.keys(state.history).length === 0;
-      updateTodayStatus();
+      const suraComplete = suraDone >= suraTotal;
+      progressBar.max = suraTotal;
+      progressBar.value = suraDone;
+      progressBar.setAttribute("aria-label", `${sura.surah}: ${formatNumber(suraDone)} من ${formatNumber(suraTotal)} تكرارًا`);
+      progressCopy.textContent = suraComplete
+        ? `اكتملت ${sura.surah} اليوم`
+        : `${formatNumber(suraDone)} من ${formatNumber(suraTotal)} تكرارًا`;
+      sessionSummary.classList.toggle("is-complete", suraComplete);
+      sessionReset.disabled = done === 0 && Object.keys(state.history).length === 0 && Object.keys(suwarState.history).length === 0;
+      updateTodayStatus(done);
+      updateSuraPicker();
     }
 
+    // As athkar's «سور» tab (athkar index.html updateDeckNavigation): «التالي» and a forward swipe wait until the shown
+    // segment's repeats are complete. The chips still switch suras at any time.
     function updateDeckNavigation() {
-      previousCardButton.disabled = currentIndex <= 0;
-      nextCardButton.disabled = currentIndex >= segments.length - 1;
-      cardPosition.textContent = `${formatNumber(currentIndex + 1)} من ${formatNumber(segments.length)}`;
-      list.setAttribute("aria-label", `مقاطع رقية القرين، المقطع ${formatNumber(currentIndex + 1)} من ${formatNumber(segments.length)}`);
+      const sura = selectedSura();
+      const index = activeIndex();
+      const position = `${formatNumber(index + 1)} من ${formatNumber(sura.segments.length)}`;
+      previousCardButton.disabled = index <= 0;
+      nextCardButton.disabled = index >= sura.segments.length - 1 || !isComplete(sura.segments[index]);
+      cardPosition.textContent = position;
+      cardPosition.setAttribute("aria-label", `المقطع ${position}`);
+      list.setAttribute("aria-label", `مقاطع ${sura.surah}، المقطع ${position}`);
     }
 
     function showCard(index, direction = "forward", announce = false) {
       clearTimeout(advanceTimer);
-      currentIndex = Math.max(0, Math.min(index, segments.length - 1));
+      const deck = activeSegments();
+      const currentIndex = Math.max(0, Math.min(index, deck.length - 1));
+      suraIndices[selectedSuraId] = currentIndex;
 
       [...list.children].forEach((item, itemIndex) => {
         const active = itemIndex === currentIndex;
@@ -1527,7 +1705,7 @@
       }
 
       updateDeckNavigation();
-      if (announce) liveRegion.textContent = segmentLabel(segments[currentIndex], currentIndex);
+      if (announce) liveRegion.textContent = segmentLabel(deck[currentIndex], currentIndex);
     }
 
     function fitCardText(card) {
@@ -1551,10 +1729,10 @@
       return navigator.vibrate(duration);
     }
 
-    function scheduleAdvance(index) {
-      if (index >= segments.length - 1) return;
+    function scheduleAdvance(sura, index) {
+      if (index >= sura.segments.length - 1) return;
       advanceTimer = setTimeout(() => {
-        if (currentIndex !== index || !isComplete(segments[index])) return;
+        if (selectedSuraId !== sura.id || activeIndex() !== index || !isComplete(sura.segments[index])) return;
         showCard(index + 1, "forward", true);
       }, motionIsReduced.matches ? 20 : 320);
     }
@@ -1567,7 +1745,13 @@
       const completesSegment = next >= segment.repeat;
       if (completesSegment) triggerHaptic(hapticDurationMs);
       saveState();
+      const sura = suraOf(segment);
+      if (completesSegment && suraIsComplete(sura) && !suwarState.completedAt[sura.id]) {
+        suwarState.completedAt[sura.id] = new Date().toISOString();
+        saveSuwarState();
+      }
       updateCard(segment, index, true);
+      updateDeckNavigation();
 
       if (allComplete()) {
         recordToday();
@@ -1578,7 +1762,7 @@
       }
 
       updateSessionProgress();
-      if (completesSegment) scheduleAdvance(index);
+      if (completesSegment) scheduleAdvance(sura, index);
     }
 
     function askConfirmation(title, copy, onConfirm) {
@@ -1593,18 +1777,23 @@
       askConfirmation("إعادة العداد؟", `سيعود عداد ${segment.surah} ${segment.range} إلى الصفر.`, () => {
         progress[segment.id] = 0;
         saveState();
+        suwarState.completedAt[suraOf(segment).id] = null;
+        saveSuwarState();
         updateCard(segment, index, true);
+        updateDeckNavigation();
         updateSessionProgress();
       });
     }
 
+    // Today's counts and sura completions; the day's history record stays (spec §8). A new ruqyah starts at ق.
     function resetDayProgress(announce = true) {
       for (const segment of segments) progress[segment.id] = 0;
       saveState();
-      segments.forEach((segment, index) => updateCard(segment, index));
-      updateSessionProgress();
+      for (const sura of RUQYAH_SUWAR) suwarState.completedAt[sura.id] = null;
+      saveSuwarState();
+      suraIndices = {};
+      selectSura(RUQYAH_SUWAR[0].id, true, "back");
       updateHistoryView();
-      showCard(0, "back", announce);
       if (announce) liveRegion.textContent = "أُعيدت عدادات اليوم";
     }
 
@@ -1782,12 +1971,16 @@
 
       clearTimeout(swipeSettleTimer);
       clearCardSwipeStyles(gesture.item);
-      showCard(currentIndex + (movesForward ? 1 : -1), movesForward ? "forward" : "back", true);
+      showCard(activeIndex() + (movesForward ? 1 : -1), movesForward ? "forward" : "back", true);
     }
 
-    function renderSegments() {
-      list.innerHTML = segments.map(segmentMarkup).join("");
-      segments.forEach((segment, index) => {
+    // The shown sura's segments, as athkar index.html renderSuraPages: opens on its first incomplete segment (0 when
+    // the sura is complete) unless a card was already shown in it since the page opened.
+    function renderSuraDeck(direction = "forward") {
+      const sura = selectedSura();
+      if (!Number.isInteger(suraIndices[sura.id])) suraIndices[sura.id] = firstIncompleteIndex(sura);
+      list.innerHTML = sura.segments.map(segmentMarkup).join("");
+      sura.segments.forEach((segment, index) => {
         const card = document.getElementById(`segment-${segment.id}`);
         card.querySelector(".card-tap-target").addEventListener("click", () => {
           if (performance.now() < suppressCardClicksUntil) return;
@@ -1799,9 +1992,34 @@
         });
         updateCard(segment, index);
       });
-      showCard(currentIndex, "forward");
+      document.title = `${sura.surah} — رقية القرين`;
+      showCard(suraIndices[sura.id], direction);
       updateSessionProgress();
-      updateHistoryView();
+    }
+
+    function renderSuraPicker() {
+      suraPicker.innerHTML = RUQYAH_SUWAR.map(sura => `
+        <button class="sura-chip" type="button" data-sura="${escapeHtml(sura.id)}" aria-pressed="false">${escapeHtml(suraShortName(sura))}<span class="sura-chip-status" aria-hidden="true"></span></button>`).join("");
+    }
+
+    // as athkar index.html updateSuraPicker; ✓ when every segment of the sura is complete today.
+    function updateSuraPicker() {
+      suraPicker.querySelectorAll("[data-sura]").forEach(chip => {
+        const sura = suraById[chip.dataset.sura];
+        const complete = suraIsComplete(sura);
+        chip.setAttribute("aria-pressed", String(sura.id === selectedSuraId));
+        chip.classList.toggle("is-complete", complete);
+        chip.querySelector(".sura-chip-status").textContent = complete ? "✓" : "";
+        chip.setAttribute("aria-label", `${sura.surah}${complete ? "، مكتملة اليوم" : ""}`);
+      });
+    }
+
+    // The hash follows the shown sura (replaceState: chip taps add no history entries).
+    function selectSura(id, updateHash = true, direction = "forward") {
+      if (!Object.hasOwn(suraById, id)) return;
+      selectedSuraId = id;
+      if (updateHash && location.hash !== `#${id}`) history.replaceState(null, "", `#${id}`);
+      renderSuraDeck(direction);
     }
 
     function applyTheme(theme) {
@@ -1832,8 +2050,24 @@
     addEventListener("pointerup", finishCardSwipe);
     addEventListener("pointercancel", cancelCardSwipe);
 
-    previousCardButton.addEventListener("click", () => showCard(currentIndex - 1, "back", true));
-    nextCardButton.addEventListener("click", () => showCard(currentIndex + 1, "forward", true));
+    previousCardButton.addEventListener("click", () => showCard(activeIndex() - 1, "back", true));
+    nextCardButton.addEventListener("click", () => showCard(activeIndex() + 1, "forward", true));
+    suraPicker.addEventListener("click", event => {
+      const chip = event.target.closest("[data-sura]");
+      if (chip) selectSura(chip.dataset.sura);
+    });
+    // A sura deep link (#qaf, #jinn, #takwir, #kafirun, #nas) opens that sura at its first incomplete segment, and the
+    // hash stays on it (athkar settles on #suwar; ruqyah has no parent tab). Any other hash becomes the shown sura's.
+    addEventListener("hashchange", () => {
+      if (!location.hash) return;
+      const id = suraIdFromHash();
+      if (!id) {
+        history.replaceState(null, "", `#${selectedSuraId}`);
+        return;
+      }
+      delete suraIndices[id];
+      selectSura(id, false);
+    });
     sessionReset.addEventListener("click", openResetDialog);
     resetDialogCancel.addEventListener("click", () => resetDialog.close());
     resetDialog.addEventListener("click", event => {
@@ -2055,7 +2289,10 @@
     textSizeSelect.value = root.dataset.textSize || "medium";
     lineSpacingSelect.value = root.dataset.lineSpacing || "comfortable";
     applyTheme(themeSelect.value);
-    renderSegments();
+    if (location.hash && !suraIdFromHash()) history.replaceState(null, "", `#${selectedSuraId}`);
+    renderSuraPicker();
+    renderSuraDeck();
+    updateHistoryView();
     updateInstallUi();
     registerServiceWorker();
     document.fonts?.ready.then(() => fitVisibleCard());
