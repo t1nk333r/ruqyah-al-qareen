@@ -1142,7 +1142,7 @@
 
   <p class="sr-only" id="live-region" aria-live="polite"></p>
 
-  <script src="./content.js?v=4"></script>
+  <script src="./content.js?v=5"></script>
   <script>
     "use strict";
 
@@ -1202,7 +1202,8 @@
     const motionIsReduced = matchMedia("(prefers-reduced-motion: reduce)");
     const colorScheme = matchMedia("(prefers-color-scheme: dark)");
 
-    const totalRepeats = RUQYAH_SEGMENTS.reduce((sum, segment) => sum + segment.repeat, 0);
+    const segments = RUQYAH_SUWAR.flatMap(sura => sura.segments);
+    const totalRepeats = segments.reduce((sum, segment) => sum + segment.repeat, 0);
 
     const dateFormatter = new Intl.DateTimeFormat("ar-EG", { weekday: "long", day: "numeric", month: "long" });
     const timeFormatter = new Intl.DateTimeFormat("ar-EG", { hour: "numeric", minute: "2-digit" });
@@ -1232,12 +1233,12 @@
     }
 
     function emptyCounts() {
-      return Object.fromEntries(RUQYAH_SEGMENTS.map(segment => [segment.id, 0]));
+      return Object.fromEntries(segments.map(segment => [segment.id, 0]));
     }
 
     function normalizeCounts(raw) {
       const counts = emptyCounts();
-      for (const segment of RUQYAH_SEGMENTS) {
+      for (const segment of segments) {
         const value = Number(raw?.[segment.id]);
         if (Number.isInteger(value)) counts[segment.id] = Math.max(0, Math.min(value, segment.repeat));
       }
@@ -1305,7 +1306,7 @@
       progress = emptyCounts();
       state.counts = progress;
       saveState();
-      RUQYAH_SEGMENTS.forEach((segment, index) => updateCard(segment, index));
+      segments.forEach((segment, index) => updateCard(segment, index));
       updateSessionProgress();
       showCard(0, "back");
       liveRegion.textContent = "بدأ يوم جديد، وأعيدت عدادات الرقية.";
@@ -1363,10 +1364,10 @@
 
     function countFor(segment) { return progress[segment.id] ?? 0; }
     function isComplete(segment) { return countFor(segment) >= segment.repeat; }
-    function allComplete() { return RUQYAH_SEGMENTS.every(isComplete); }
+    function allComplete() { return segments.every(isComplete); }
 
     function firstIncompleteIndex() {
-      const index = RUQYAH_SEGMENTS.findIndex(segment => !isComplete(segment));
+      const index = segments.findIndex(segment => !isComplete(segment));
       return index === -1 ? 0 : index;
     }
 
@@ -1483,7 +1484,7 @@
     }
 
     function updateSessionProgress() {
-      const done = RUQYAH_SEGMENTS.reduce((sum, segment) => sum + countFor(segment), 0);
+      const done = segments.reduce((sum, segment) => sum + countFor(segment), 0);
       progressBar.max = totalRepeats;
       progressBar.value = done;
       progressCopy.textContent = `${formatNumber(done)} من ${formatNumber(totalRepeats)} تكرارًا`;
@@ -1494,14 +1495,14 @@
 
     function updateDeckNavigation() {
       previousCardButton.disabled = currentIndex <= 0;
-      nextCardButton.disabled = currentIndex >= RUQYAH_SEGMENTS.length - 1;
-      cardPosition.textContent = `${formatNumber(currentIndex + 1)} من ${formatNumber(RUQYAH_SEGMENTS.length)}`;
-      list.setAttribute("aria-label", `مقاطع رقية القرين، المقطع ${formatNumber(currentIndex + 1)} من ${formatNumber(RUQYAH_SEGMENTS.length)}`);
+      nextCardButton.disabled = currentIndex >= segments.length - 1;
+      cardPosition.textContent = `${formatNumber(currentIndex + 1)} من ${formatNumber(segments.length)}`;
+      list.setAttribute("aria-label", `مقاطع رقية القرين، المقطع ${formatNumber(currentIndex + 1)} من ${formatNumber(segments.length)}`);
     }
 
     function showCard(index, direction = "forward", announce = false) {
       clearTimeout(advanceTimer);
-      currentIndex = Math.max(0, Math.min(index, RUQYAH_SEGMENTS.length - 1));
+      currentIndex = Math.max(0, Math.min(index, segments.length - 1));
 
       [...list.children].forEach((item, itemIndex) => {
         const active = itemIndex === currentIndex;
@@ -1526,7 +1527,7 @@
       }
 
       updateDeckNavigation();
-      if (announce) liveRegion.textContent = segmentLabel(RUQYAH_SEGMENTS[currentIndex], currentIndex);
+      if (announce) liveRegion.textContent = segmentLabel(segments[currentIndex], currentIndex);
     }
 
     function fitCardText(card) {
@@ -1551,9 +1552,9 @@
     }
 
     function scheduleAdvance(index) {
-      if (index >= RUQYAH_SEGMENTS.length - 1) return;
+      if (index >= segments.length - 1) return;
       advanceTimer = setTimeout(() => {
-        if (currentIndex !== index || !isComplete(RUQYAH_SEGMENTS[index])) return;
+        if (currentIndex !== index || !isComplete(segments[index])) return;
         showCard(index + 1, "forward", true);
       }, motionIsReduced.matches ? 20 : 320);
     }
@@ -1598,9 +1599,9 @@
     }
 
     function resetDayProgress(announce = true) {
-      for (const segment of RUQYAH_SEGMENTS) progress[segment.id] = 0;
+      for (const segment of segments) progress[segment.id] = 0;
       saveState();
-      RUQYAH_SEGMENTS.forEach((segment, index) => updateCard(segment, index));
+      segments.forEach((segment, index) => updateCard(segment, index));
       updateSessionProgress();
       updateHistoryView();
       showCard(0, "back", announce);
@@ -1785,8 +1786,8 @@
     }
 
     function renderSegments() {
-      list.innerHTML = RUQYAH_SEGMENTS.map(segmentMarkup).join("");
-      RUQYAH_SEGMENTS.forEach((segment, index) => {
+      list.innerHTML = segments.map(segmentMarkup).join("");
+      segments.forEach((segment, index) => {
         const card = document.getElementById(`segment-${segment.id}`);
         card.querySelector(".card-tap-target").addEventListener("click", () => {
           if (performance.now() < suppressCardClicksUntil) return;
