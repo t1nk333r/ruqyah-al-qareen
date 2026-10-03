@@ -138,6 +138,8 @@
       width: min(100%, var(--content-width));
       margin: 0 auto;
       padding: 0 0.9rem max(1rem, env(safe-area-inset-bottom));
+      /* The card-enter animation slides 1rem towards the left, which in RTL is the scrollable side. */
+      overflow-x: clip;
     }
 
     .brand-row {
@@ -249,6 +251,7 @@
     }
 
     .history-row {
+      flex-wrap: wrap;
       display: flex;
       align-items: center;
       justify-content: space-between;
@@ -277,11 +280,13 @@
 
     .history-row.is-complete .history-state { color: var(--completed); }
 
-    /* The suras completed on a day that is not a full ruqyah day, as athkar index.html .history-suwar. */
+    .history-date { white-space: nowrap; }
+
+    /* Own full-width line under the date, as athkar index.html .history-suwar. */
     .history-suwar {
       display: flex;
+      flex: 1 0 100%;
       flex-wrap: wrap;
-      justify-content: flex-end;
       gap: 0.25rem 0.75rem;
     }
 
@@ -439,12 +444,22 @@
     .surah-card.is-fit-3 .card-body { --fit-scale: 0.82; --fit-lead: 0.34; }
     .surah-card.is-fit-4 .card-body { --fit-scale: 0.76; --fit-lead: 0.44; }
     .surah-card.is-fit-5 .card-body { --fit-scale: 0.70; --fit-lead: 0.54; }
+    /* Steps 6 and 7 are for 320 px screens at large text: they cut the leading harder, but never below 1.3. */
+    .surah-card.is-fit-6 .card-body { --fit-scale: 0.64; --fit-lead: 0.66; }
+    .surah-card.is-fit-7 .card-body { --fit-scale: 0.58; --fit-lead: 0.8; }
 
     .surah-card[class*="is-fit-"] .ayat,
     .surah-card[class*="is-fit-"] .basmala {
       font-size: calc(var(--quran-text-size) * var(--fit-scale, 1));
       line-height: calc(var(--quran-line-height) - var(--fit-lead, 0));
     }
+
+    .surah-card:is(.is-fit-6, .is-fit-7) .ayat,
+    .surah-card:is(.is-fit-6, .is-fit-7) .basmala {
+      line-height: max(1.3, calc(var(--quran-line-height) - var(--fit-lead)));
+    }
+
+    .surah-card.surah-card:is(.is-fit-6, .is-fit-7) .basmala { margin-block-end: 0.2rem; }
 
     .surah-card[class*="is-fit-"] .basmala {
       font-size: calc(var(--quran-text-size) * var(--fit-scale, 1) * 0.92);
@@ -538,6 +553,13 @@
     }
 
     .card-tap-target[aria-disabled="true"] { cursor: default; }
+    .card-tap-target:focus-visible { outline: none; }
+
+    /* The tap target covers the card, so its focus ring is drawn on the card, as athkar index.html .dhikr-card. */
+    .surah-card:has(.card-tap-target:focus-visible) {
+      border-color: var(--focus);
+      box-shadow: 0 0 0 3px color-mix(in srgb, var(--focus) 24%, transparent), var(--shadow-soft);
+    }
 
     .deck-navigation {
       display: grid;
@@ -848,6 +870,16 @@
 
     .completion-dialog .dialog-actions { justify-content: center; }
 
+    .completion-time {
+      display: block;
+      margin-block-start: 0.65rem;
+      color: var(--completed);
+      font-family: "Noto Sans Arabic", Tahoma, Arial, sans-serif;
+      font-weight: 800;
+    }
+
+    .completion-time:empty { display: none; }
+
     .update-banner {
       position: fixed;
       inset-inline: 0.9rem;
@@ -968,6 +1000,84 @@
       .sura-chip { gap: 0.1rem; padding-inline: 0.25rem; font-size: 0.76rem; }
     }
 
+    /* Compact portrait layout, as athkar index.html (max-width: 45rem) and (orientation: portrait): the shell is one
+       screen tall and the card takes the space left between the summary and the controls, so «السابق» and «التالي»
+       stay on screen and above the home indicator; fitCardText shrinks the text to the card. */
+    @media (max-width: 45rem) and (orientation: portrait) {
+      .app-shell {
+        block-size: 100vh;
+        block-size: 100svh;
+        display: grid;
+        grid-template-rows: auto minmax(0, 1fr);
+        padding-block-end: max(0.55rem, env(safe-area-inset-bottom));
+      }
+
+      .brand-row { padding-block-start: max(0.55rem, env(safe-area-inset-top)); }
+      .eyebrow { display: none; }
+
+      .session-summary {
+        margin-block-start: 0.45rem;
+        padding: 0.5rem 0.7rem;
+        border-radius: 0.9rem;
+      }
+
+      .today-status { margin-block-start: 0.3rem; }
+
+      main {
+        display: grid;
+        grid-template-rows: minmax(0, 1fr) auto auto;
+        min-block-size: 0;
+      }
+
+      .ruqyah-list {
+        block-size: auto;
+        min-block-size: 0;
+        margin: 0.6rem 0 0.55rem;
+        padding-block-end: 0.65rem;
+      }
+
+      .ruqyah-list::before { inset-block-start: 0.65rem; }
+      .ruqyah-list::after {
+        inset-block-start: 0.35rem;
+        inset-block-end: 0.35rem;
+      }
+
+      .surah-card {
+        padding: 0.95rem 1.1rem;
+        border-radius: 1.5rem;
+      }
+
+      .deck-navigation { gap: 0.45rem; }
+
+      .deck-button {
+        min-width: 5.7rem;
+        min-height: 2.6rem;
+        padding: 0.4rem 0.75rem;
+        font-size: 0.8rem;
+      }
+
+      .card-position {
+        min-width: 4.7rem;
+        font-size: 0.78rem;
+      }
+
+      .deck-hint {
+        margin: 0.35rem 0 0;
+        font-size: 0.7rem;
+        line-height: 1.3;
+      }
+    }
+
+    /* Short portrait screens (iPhone SE 1st gen, 320×568): the hint gives its line to the card and the card's own
+       padding tightens, so the longest segments still fit at large text. */
+    @media (max-height: 37rem) and (orientation: portrait) {
+      .deck-hint { display: none; }
+      .surah-card { padding-block: 0.7rem; }
+      .card-head { padding-block-end: 0.4rem; }
+      .card-body { padding-block: 0.45rem; }
+      .card-foot { padding-block-start: 0.45rem; }
+    }
+
     @media (max-width: 30rem) {
       .settings-grid { grid-template-columns: 1fr; }
       .icon-button .button-label { display: none; }
@@ -1058,12 +1168,12 @@
         <button class="deck-button" id="previous-card" type="button" disabled>
           <span aria-hidden="true">→</span><span>السابق</span>
         </button>
-        <output class="card-position" id="card-position" aria-live="polite">١ من ٧</output>
+        <output class="card-position" id="card-position" aria-live="off">١ من ٧</output>
         <button class="deck-button" id="next-card" type="button">
           <span>التالي</span><span aria-hidden="true">←</span>
         </button>
       </nav>
-      <p class="deck-hint">اضغط على البطاقة بعد كل قراءة؛ واسحب للتنقل بين المقاطع.</p>
+      <p class="deck-hint">اضغط على البطاقة بعد كل قراءة، واسحب للتنقل؛ ويظهر التالي تلقائيًا بعد إكمال التكرار.</p>
     </main>
   </div>
 
@@ -1196,6 +1306,7 @@
     <div class="dialog-body">
       <h2 id="completion-title">تمت الرقية بحمد الله</h2>
       <p id="completion-copy">اكتملت جميع المقاطع بتكراراتها.</p>
+      <time class="completion-time" id="completion-time"></time>
     </div>
     <div class="dialog-actions">
       <button class="dialog-button" id="completion-close" type="button">إغلاق</button>
@@ -1215,7 +1326,8 @@
     <div class="completion-mark" aria-hidden="true">✓</div>
     <div class="dialog-body">
       <h2 id="sura-completion-title">اكتملت قراءة السورة بحمد الله</h2>
-      <p id="sura-completion-copy"></p>
+      <p id="sura-completion-copy">تم حفظ إكمال اليوم محليًا على هذا الجهاز.</p>
+      <time class="completion-time" id="sura-completion-time"></time>
     </div>
     <div class="dialog-actions">
       <button class="dialog-button" id="sura-completion-close" type="button">تم</button>
@@ -1281,7 +1393,8 @@
     const completionRestart = document.getElementById("completion-restart");
     const suraCompletionDialog = document.getElementById("sura-completion-dialog");
     const suraCompletionTitle = document.getElementById("sura-completion-title");
-    const suraCompletionCopy = document.getElementById("sura-completion-copy");
+    const suraCompletionTime = document.getElementById("sura-completion-time");
+    const completionTimeLabel = document.getElementById("completion-time");
     const suraCompletionClose = document.getElementById("sura-completion-close");
     const suraCompletionSwitch = document.getElementById("sura-completion-switch");
     const resetDialog = document.getElementById("reset-dialog");
@@ -1315,6 +1428,8 @@
     const dateFormatter = new Intl.DateTimeFormat("ar-EG", { weekday: "long", day: "numeric", month: "long" });
     const timeFormatter = new Intl.DateTimeFormat("ar-EG", { hour: "numeric", minute: "2-digit" });
 
+    let lastDailyRaw = null;
+    let lastSuwarRaw = null;
     let state = loadState();
     let progress = state.counts;
     let suwarState = loadSuwarState();
@@ -1348,11 +1463,13 @@
       return Object.fromEntries(segments.map(segment => [segment.id, 0]));
     }
 
+    // Only real integers count (not true, "3" or [7]), clamped to the segment's repeat.
     function normalizeCounts(raw) {
       const counts = emptyCounts();
+      if (!raw || typeof raw !== "object") return counts;
       for (const segment of segments) {
-        const value = Number(raw?.[segment.id]);
-        if (Number.isInteger(value)) counts[segment.id] = Math.max(0, Math.min(value, segment.repeat));
+        const value = Object.hasOwn(raw, segment.id) ? raw[segment.id] : undefined;
+        if (typeof value === "number" && Number.isInteger(value)) counts[segment.id] = Math.max(0, Math.min(value, segment.repeat));
       }
       return counts;
     }
@@ -1368,10 +1485,14 @@
       return history;
     }
 
+    // lastDailyRaw / lastSuwarRaw: the stored strings this tab last read or wrote, so syncFromStorage can tell when
+    // another tab has written.
     function loadState() {
       const today = localDateKey();
       try {
-        const raw = JSON.parse(localStorage.getItem(dailyStorageKey) || "null");
+        const stored = localStorage.getItem(dailyStorageKey);
+        lastDailyRaw = stored;
+        const raw = JSON.parse(stored || "null");
         if (raw) {
           const date = /^\d{4}-\d{2}-\d{2}$/.test(raw.date) ? raw.date : today;
           return {
@@ -1382,8 +1503,14 @@
         }
         const legacy = JSON.parse(localStorage.getItem(progressStorageKey) || "null");
         if (legacy) {
-          try { localStorage.removeItem(progressStorageKey); } catch (_) {}
-          return { date: today, counts: normalizeCounts(legacy), history: {} };
+          // Saved before the legacy key goes, so a reload straight after the import keeps the counts.
+          const imported = { date: today, counts: normalizeCounts(legacy), history: {} };
+          try {
+            localStorage.setItem(dailyStorageKey, JSON.stringify(imported));
+            lastDailyRaw = JSON.stringify(imported);
+            localStorage.removeItem(progressStorageKey);
+          } catch (_) {}
+          return imported;
         }
       } catch (_) {}
       return { date: today, counts: emptyCounts(), history: {} };
@@ -1391,7 +1518,8 @@
 
     function saveState() {
       state.counts = progress;
-      try { localStorage.setItem(dailyStorageKey, JSON.stringify(state)); } catch (_) {}
+      lastDailyRaw = JSON.stringify(state);
+      try { localStorage.setItem(dailyStorageKey, lastDailyRaw); } catch (_) {}
     }
 
     function trimHistory() {
@@ -1408,7 +1536,7 @@
     }
 
     function normalizeSuwarState(parsed) {
-      const date = typeof parsed.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date) ? parsed.date : state.date;
+      const date = typeof parsed.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(parsed.date) && isRealDate(parsed.date) ? parsed.date : state.date;
       const normalized = emptySuwarState(date);
       const completedAt = parsed.completedAt && typeof parsed.completedAt === "object" ? parsed.completedAt : {};
       for (const sura of RUQYAH_SUWAR) {
@@ -1418,7 +1546,7 @@
       }
       const history = parsed.history && typeof parsed.history === "object" ? parsed.history : {};
       for (const [day, entry] of Object.entries(history)) {
-        if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || day >= date || !entry || typeof entry !== "object") continue;
+        if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !isRealDate(day) || day >= date || !entry || typeof entry !== "object") continue;
         const completed = Object.fromEntries(Object.entries(entry)
           .filter(([id, at]) => Object.hasOwn(suraById, id) && typeof at === "string"));
         if (Object.keys(completed).length) normalized.history[day] = completed;
@@ -1432,10 +1560,11 @@
       return Object.fromEntries(kept.map(day => [day, history[day]]));
     }
 
+    // Never writes a day later than nextDate: a stored date in the future (a clock set back) adds nothing to history.
     function rollSuwarStateToDate(candidate, nextDate) {
       const completed = Object.fromEntries(Object.entries(candidate.completedAt).filter(([, at]) => at));
-      const history = { ...candidate.history };
-      if (Object.keys(completed).length) history[candidate.date] = completed;
+      const history = Object.fromEntries(Object.entries(candidate.history).filter(([day]) => day < nextDate));
+      if (Object.keys(completed).length && candidate.date < nextDate) history[candidate.date] = completed;
       return { ...emptySuwarState(nextDate), history: trimSuwarHistory(history) };
     }
 
@@ -1458,17 +1587,39 @@
         stored = localStorage.getItem(suwarStorageKey);
         parsed = JSON.parse(stored);
       } catch (_) {}
+      lastSuwarRaw = stored;
       let loaded = parsed && typeof parsed === "object" ? normalizeSuwarState(parsed) : emptySuwarState();
       if (loaded.date !== state.date) loaded = rollSuwarStateToDate(loaded, state.date);
       backfillSuwarCompletions(loaded);
       if (JSON.stringify(loaded) !== stored) {
-        try { localStorage.setItem(suwarStorageKey, JSON.stringify(loaded)); } catch (_) {}
+        lastSuwarRaw = JSON.stringify(loaded);
+        try { localStorage.setItem(suwarStorageKey, lastSuwarRaw); } catch (_) {}
       }
       return loaded;
     }
 
     function saveSuwarState() {
-      try { localStorage.setItem(suwarStorageKey, JSON.stringify(suwarState)); } catch (_) {}
+      lastSuwarRaw = JSON.stringify(suwarState);
+      try { localStorage.setItem(suwarStorageKey, lastSuwarRaw); } catch (_) {}
+    }
+
+    // Another tab of the app shares both keys. When either changed since this tab last read or wrote it, reload both
+    // and redraw, so this tab never writes over the other's counts or deletes its record. Run before every write
+    // (through ensureCurrentDay and the reset actions) and on the storage event.
+    function syncFromStorage() {
+      let daily = null;
+      let suwar = null;
+      try {
+        daily = localStorage.getItem(dailyStorageKey);
+        suwar = localStorage.getItem(suwarStorageKey);
+      } catch (_) { return false; }
+      if (daily === lastDailyRaw && suwar === lastSuwarRaw) return false;
+      state = loadState();
+      progress = state.counts;
+      suwarState = loadSuwarState();
+      renderSuraDeck(null);
+      updateHistoryView();
+      return true;
     }
 
     function todayIsRecorded() {
@@ -1485,7 +1636,9 @@
 
     function ensureCurrentDay() {
       const today = localDateKey();
-      if (state.date === today && suwarState.date === today) return false;
+      const rolled = state.date !== today || suwarState.date !== today;
+      syncFromStorage();
+      if (!rolled) return false;
       if (state.date !== today) {
         state.date = today;
         progress = emptyCounts();
@@ -1498,6 +1651,7 @@
       }
       suraIndices = {};
       renderSuraDeck("back");
+      updateHistoryView();
       liveRegion.textContent = "بدأ يوم جديد، وأعيدت عدادات الرقية.";
       return true;
     }
@@ -1539,7 +1693,7 @@
         } else status = `<span class="history-state">${isToday ? "لم تكتمل بعد" : "لم تُسجل"}</span>`;
         return `
           <li class="history-row${entry ? " is-complete" : ""}${isToday ? " is-today" : ""}">
-            <span>${escapeHtml(isToday ? `اليوم — ${historyDateLabel(date)}` : historyDateLabel(date))}</span>
+            <span class="history-date">${escapeHtml(isToday ? `اليوم — ${historyDateLabel(date)}` : historyDateLabel(date))}</span>
             ${status}
           </li>`;
       }).join("");
@@ -1555,7 +1709,7 @@
       const entry = state.history[state.date];
       const time = completionTime(entry);
       todayStatus.textContent = entry
-        ? (time ? `تمت رقية اليوم في ${time}.` : "تمت رقية اليوم.")
+        ? (time ? `تمت رقية اليوم في ${time}` : "تمت رقية اليوم")
         : `رقية اليوم: ${formatNumber(done)} من ${formatNumber(totalRepeats)} تكرارًا`;
       todayStatus.classList.toggle("is-complete", Boolean(entry));
     }
@@ -1650,6 +1804,7 @@
       return `
         <li hidden>
           <article class="surah-card" id="segment-${escapeHtml(segment.id)}">
+            <button class="card-tap-target" type="button" data-count="${escapeHtml(segment.id)}"></button>
             <header class="card-head">
               <h2 class="card-surah">${escapeHtml(segment.surah)}</h2>
               <span class="card-range">${escapeHtml(segment.range)}</span>
@@ -1667,7 +1822,6 @@
                 </button>
               </div>
             </footer>
-            <button class="card-tap-target" type="button" data-count="${escapeHtml(segment.id)}"></button>
           </article>
         </li>`;
     }
@@ -1764,8 +1918,8 @@
       if (!card) return;
       const body = card.querySelector(".card-body");
       if (!body) return;
-      card.classList.remove("is-fit-1", "is-fit-2", "is-fit-3", "is-fit-4", "is-fit-5");
-      for (let step = 1; step <= 5; step += 1) {
+      card.classList.remove("is-fit-1", "is-fit-2", "is-fit-3", "is-fit-4", "is-fit-5", "is-fit-6", "is-fit-7");
+      for (let step = 1; step <= 7; step += 1) {
         if (body.scrollHeight <= body.clientHeight + 1) return;
         card.classList.remove(`is-fit-${step - 1}`);
         card.classList.add(`is-fit-${step}`);
@@ -1781,12 +1935,19 @@
       return navigator.vibrate(duration);
     }
 
+    // Auto-advance; a focused tap target is hidden by the move, so focus follows to the next card's.
     function scheduleAdvance(sura, index) {
       if (index >= sura.segments.length - 1) return;
       advanceTimer = setTimeout(() => {
         if (selectedSuraId !== sura.id || activeIndex() !== index || !isComplete(sura.segments[index])) return;
+        const hadFocus = list.contains(document.activeElement);
         showCard(index + 1, "forward", true);
+        if (hadFocus) focusShownCard();
       }, motionIsReduced.matches ? 20 : 320);
+    }
+
+    function focusShownCard() {
+      list.querySelector("li:not([hidden]) .card-tap-target")?.focus({ preventScroll: true });
     }
 
     function countReading(segment, index) {
@@ -1810,6 +1971,8 @@
         recordToday();
         updateSessionProgress();
         updateHistoryView();
+        const time = completionTime(state.history[state.date]);
+        completionTimeLabel.textContent = time ? `وقت الإكمال: ${time}` : "";
         completionDialog.showModal();
         return;
       }
@@ -1826,7 +1989,7 @@
       const next = [...RUQYAH_SUWAR.slice(position + 1), ...RUQYAH_SUWAR.slice(0, position)].find(other => !suraIsComplete(other));
       const time = completionTime({ completedAt: suwarState.completedAt[sura.id] });
       suraCompletionTitle.textContent = `اكتملت قراءة ${sura.surah} بحمد الله`;
-      suraCompletionCopy.textContent = time ? `وقت الإكمال: ${time}.` : "";
+      suraCompletionTime.textContent = time ? `وقت الإكمال: ${time}` : "";
       suraCompletionSwitch.dataset.sura = next.id;
       suraCompletionSwitch.textContent = `الانتقال إلى ${next.surah}`;
       suraCompletionDialog.showModal();
@@ -1842,6 +2005,7 @@
     function resetSegment(segment, index) {
       if (!countFor(segment)) return;
       askConfirmation("إعادة العداد؟", `سيعود عداد ${segment.surah} ${segment.range} إلى الصفر.`, () => {
+        syncFromStorage();
         progress[segment.id] = 0;
         saveState();
         suwarState.completedAt[suraOf(segment).id] = null;
@@ -1854,6 +2018,7 @@
 
     // Today's counts and sura completions; the day's history record stays (spec §8). A new ruqyah starts at ق.
     function resetDayProgress(announce = true) {
+      syncFromStorage();
       for (const segment of segments) progress[segment.id] = 0;
       saveState();
       for (const sura of RUQYAH_SUWAR) suwarState.completedAt[sura.id] = null;
@@ -1881,16 +2046,21 @@
       return `${formatNumber(count)} يومًا`;
     }
 
-    // Week and everything delete per-sura history too and count the union of both stores' dates, as athkar
-    // index.html resetWeek and resetEverything.
+    // The days the history list can show: full days the backup carries (backupHistory) and earlier days with a
+    // completed sura. Week and everything delete per-sura history too and count these dates, as athkar index.html
+    // resetWeek and resetEverything count the union of both stores.
+    function historyDates() {
+      return new Set([...Object.keys(backupHistory(state.history)), ...Object.keys(suwarState.history).filter(date => date < state.date)]);
+    }
+
     function resetWeek() {
       const dates = recentDates(7);
-      const recorded = new Set([...Object.keys(state.history), ...Object.keys(suwarState.history)]
-        .filter(date => dates.includes(date))).size;
+      const recorded = [...historyDates()].filter(date => dates.includes(date)).length;
       askConfirmation(
         "حذف سجل هذا الأسبوع؟",
         `ستُعاد عدادات اليوم، وسيُحذف ${recorded ? `سجل ${dayCountLabel(recorded)} من آخر أسبوع` : "سجل آخر سبعة أيام"}. لا يمكن التراجع.`,
         () => {
+          syncFromStorage();
           for (const date of dates) {
             delete state.history[date];
             delete suwarState.history[date];
@@ -1902,11 +2072,12 @@
     }
 
     function resetEverything() {
-      const recorded = new Set([...Object.keys(state.history), ...Object.keys(suwarState.history)]).size;
+      const recorded = historyDates().size;
       askConfirmation(
         "حذف كل شيء؟",
         `ستُعاد العدادات وسيُحذف السجل كاملًا${recorded ? ` (${dayCountLabel(recorded)})` : ""}. لا يمكن التراجع.`,
         () => {
+          syncFromStorage();
           state.history = {};
           suwarState.history = {};
           resetDayProgress(false);
@@ -2195,8 +2366,16 @@
     addEventListener("pointerup", finishCardSwipe);
     addEventListener("pointercancel", cancelCardSwipe);
 
-    previousCardButton.addEventListener("click", () => showCard(activeIndex() - 1, "back", true));
-    nextCardButton.addEventListener("click", () => showCard(activeIndex() + 1, "forward", true));
+    // A move onto an incomplete card disables «التالي» (or, at the start, «السابق») while it has focus; focus moves to
+    // the shown card's tap target instead of falling to the page.
+    previousCardButton.addEventListener("click", () => {
+      showCard(activeIndex() - 1, "back", true);
+      if (previousCardButton.disabled) focusShownCard();
+    });
+    nextCardButton.addEventListener("click", () => {
+      showCard(activeIndex() + 1, "forward", true);
+      if (nextCardButton.disabled) focusShownCard();
+    });
     suraPicker.addEventListener("click", event => {
       const chip = event.target.closest("[data-sura]");
       if (chip) selectSura(chip.dataset.sura);
@@ -2350,6 +2529,10 @@
     suraCompletionSwitch.addEventListener("click", () => {
       suraCompletionDialog.close();
       selectSura(suraCompletionSwitch.dataset.sura);
+      focusShownCard();
+    });
+    addEventListener("storage", event => {
+      if (event.key === null || event.key === dailyStorageKey || event.key === suwarStorageKey) syncFromStorage();
     });
 
     themeSelect.addEventListener("change", () => {
