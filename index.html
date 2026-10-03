@@ -1223,6 +1223,17 @@
     </div>
   </dialog>
 
+  <dialog id="install-dialog" aria-labelledby="install-dialog-title" aria-describedby="install-dialog-copy">
+    <div class="dialog-body">
+      <h2 id="install-dialog-title">ثبّت رقية القرين</h2>
+      <p id="install-dialog-copy">ثبّت التطبيق لفتحه بسرعة والقراءة دون اتصال.</p>
+    </div>
+    <div class="dialog-actions">
+      <button class="dialog-button" id="install-dialog-later" type="button">ليس الآن</button>
+      <button class="dialog-button primary" id="install-dialog-confirm" type="button">تثبيت الآن</button>
+    </div>
+  </dialog>
+
   <p class="sr-only" id="live-region" aria-live="polite"></p>
 
   <script src="./content.js?v=5"></script>
@@ -1280,6 +1291,11 @@
     const resetDialogCancel = document.getElementById("reset-dialog-cancel");
     const installButton = document.getElementById("install-button");
     const installStatus = document.getElementById("install-status");
+    const installDialog = document.getElementById("install-dialog");
+    const installDialogCopy = document.getElementById("install-dialog-copy");
+    const installDialogLater = document.getElementById("install-dialog-later");
+    const installDialogConfirm = document.getElementById("install-dialog-confirm");
+    const installOnboardingStorageKey = "ruqyah-install-onboarding-v1";
     const updateBanner = document.getElementById("update-banner");
     const updateApply = document.getElementById("update-apply");
     const updateDismiss = document.getElementById("update-dismiss");
@@ -1313,6 +1329,7 @@
     let pendingConfirmation = null;
     let deferredInstallPrompt = null;
     let waitingWorker = null;
+    let installOnboardingTimer = null;
     let reloadingForUpdate = false;
     let advanceTimer = null;
     let dayRolloverTimer = null;
@@ -2086,20 +2103,91 @@
       themeColor.setAttribute("content", dark ? "#1e2833" : "#f6f4ee");
     }
 
+    // Install onboarding as athkar index.html isIosDevice … scheduleFirstUseInstallPrompt: iOS Safari never fires
+    // beforeinstallprompt, so iPhone and iPad get the «إضافة إلى الشاشة الرئيسية» steps instead.
+    function isIosDevice() {
+      return /iPad|iPhone|iPod/i.test(navigator.userAgent) ||
+        (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+    }
+
     function isInstalled() {
       return matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
     }
 
+    function hasSeenInstallOnboarding() {
+      try { return localStorage.getItem(installOnboardingStorageKey) === "seen"; }
+      catch (_) { return false; }
+    }
+
+    function markInstallOnboardingSeen() {
+      try { localStorage.setItem(installOnboardingStorageKey, "seen"); } catch (_) {}
+    }
+
+    function updateInstallDialogUi() {
+      if (isIosDevice()) {
+        installDialogCopy.textContent =
+          "على آيفون وآيباد: افتح الموقع في سفاري، واضغط زر المشاركة، ثم اختر «إضافة إلى الشاشة الرئيسية».";
+        installDialogConfirm.textContent = "فهمت";
+      } else if (deferredInstallPrompt) {
+        installDialogCopy.textContent =
+          "ثبّت التطبيق لفتحه بسرعة، واستخدامه كنافذة مستقلة، والقراءة دون اتصال.";
+        installDialogConfirm.textContent = "تثبيت الآن";
+      } else {
+        installDialogCopy.textContent =
+          "افتح قائمة المتصفح واختر «تثبيت التطبيق» أو «إضافة إلى الشاشة الرئيسية».";
+        installDialogConfirm.textContent = "فهمت";
+      }
+    }
+
     function updateInstallUi() {
+      installButton.textContent = "تثبيت التطبيق";
       if (isInstalled()) {
         installButton.disabled = true;
         installStatus.textContent = "التطبيق مثبت على هذا الجهاز.";
+      } else if (isIosDevice()) {
+        installButton.disabled = false;
+        installButton.textContent = "طريقة التثبيت على آيفون وآيباد";
+        installStatus.textContent = "يُثبّت من سفاري عبر «المشاركة» ثم «إضافة إلى الشاشة الرئيسية».";
+      } else if (deferredInstallPrompt) {
+        installButton.disabled = false;
+        installStatus.textContent = "ثبّت التطبيق لفتحه بسرعة والقراءة دون اتصال.";
+      } else {
+        installButton.disabled = false;
+        installButton.textContent = "طريقة التثبيت";
+        installStatus.textContent = "استخدم «تثبيت التطبيق» أو «إضافة إلى الشاشة الرئيسية» من قائمة المتصفح.";
+      }
+      if (installDialog.open) updateInstallDialogUi();
+    }
+
+    function showInstallDialog() {
+      if (isInstalled() || installDialog.open) return;
+      if (settingsDialog.open) settingsDialog.close();
+      updateInstallDialogUi();
+      installDialog.showModal();
+    }
+
+    function scheduleFirstUseInstallPrompt(delay = 1200) {
+      clearTimeout(installOnboardingTimer);
+      if (isInstalled() || hasSeenInstallOnboarding()) return;
+      installOnboardingTimer = setTimeout(() => {
+        if (document.querySelector("dialog[open]")) {
+          scheduleFirstUseInstallPrompt(1800);
+          return;
+        }
+        showInstallDialog();
+      }, delay);
+    }
+
+    async function installApp() {
+      if (!deferredInstallPrompt) {
+        showInstallDialog();
         return;
       }
-      installButton.disabled = !deferredInstallPrompt;
-      installStatus.textContent = deferredInstallPrompt
-        ? "ثبّت التطبيق لفتحه بسرعة والقراءة دون اتصال."
-        : "يمكن تثبيت التطبيق من قائمة المتصفح عند توفر الخيار.";
+      const prompt = deferredInstallPrompt;
+      deferredInstallPrompt = null;
+      prompt.prompt();
+      await prompt.userChoice.catch(() => {});
+      updateInstallUi();
     }
 
     list.addEventListener("pointerdown", beginCardSwipe);
@@ -2305,15 +2393,29 @@
 
     addEventListener("appinstalled", () => {
       deferredInstallPrompt = null;
+      markInstallOnboardingSeen();
+      if (installDialog.open) installDialog.close();
       updateInstallUi();
     });
 
-    installButton.addEventListener("click", async () => {
-      if (!deferredInstallPrompt) return;
-      deferredInstallPrompt.prompt();
-      await deferredInstallPrompt.userChoice.catch(() => {});
-      deferredInstallPrompt = null;
-      updateInstallUi();
+    installButton.addEventListener("click", () => {
+      if (deferredInstallPrompt) installApp();
+      else showInstallDialog();
+    });
+    installDialogLater.addEventListener("click", () => {
+      markInstallOnboardingSeen();
+      installDialog.close();
+    });
+    installDialogConfirm.addEventListener("click", async () => {
+      markInstallOnboardingSeen();
+      installDialog.close();
+      if (deferredInstallPrompt) await installApp();
+    });
+    installDialog.addEventListener("cancel", markInstallOnboardingSeen);
+    installDialog.addEventListener("click", event => {
+      if (event.target !== installDialog) return;
+      markInstallOnboardingSeen();
+      installDialog.close();
     });
 
     updateApply.addEventListener("click", () => {
@@ -2357,6 +2459,7 @@
     updateHistoryView();
     updateInstallUi();
     registerServiceWorker();
+    addEventListener("load", () => scheduleFirstUseInstallPrompt(2600), { once: true });
     document.fonts?.ready.then(() => fitVisibleCard());
     scheduleDayRollover();
     addEventListener("visibilitychange", () => {
