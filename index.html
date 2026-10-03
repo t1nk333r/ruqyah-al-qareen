@@ -1437,6 +1437,12 @@
     let suwarState = null;
     let storageMode = "idb";
     let dbPromise = null;
+    // This page's progress jobs (first read, each change, each refresh after another tab's commit) run one after
+    // another: a job starts only when the one before it has committed or fallen back to memory, and decides then
+    // whether to use the database. storageGeneration changes when the session falls back to memory, and a callback
+    // from an older generation never adopts what it read.
+    let jobs = Promise.resolve();
+    let storageGeneration = 0;
     const stateChannel = "BroadcastChannel" in window ? new BroadcastChannel("ruqyah-state") : null;
     let hapticsEnabled = true;
     try { hapticsEnabled = localStorage.getItem(hapticsStorageKey) !== "off"; } catch (_) {}
@@ -1636,28 +1642,42 @@
     // import once; the legacy key goes only after its counts are committed. When IndexedDB cannot be used (blocked,
     // private mode, quota) the session runs in memory, started from localStorage when it can be read.
     function initStore() {
-      let imported = null;
-      return openDatabase()
-        .then(db => runTransaction(db, "readwrite", (daily, suwar, store) => {
-          if (daily !== undefined) {
-            adoptStored(daily, suwar);
-            return;
-          }
-          imported = readLocalStorageState();
-          adoptStored(imported.daily, imported.suwar);
-          store.put(state, "daily");
-          store.put(suwarState, "suwar");
-        }))
-        .then(() => {
-          if (!imported?.fromLegacy) return;
-          mirrorToLocalStorage();
-          try { localStorage.removeItem(progressStorageKey); } catch (_) {}
-        })
-        .catch(() => {
-          storageMode = "memory";
-          const local = readLocalStorageState();
-          adoptStored(local.daily, local.suwar);
-        });
+      return enqueueJob(() => {
+        let imported = null;
+        return openDatabase()
+          .then(db => runTransaction(db, "readwrite", (daily, suwar, store) => {
+            if (daily !== undefined) {
+              adoptStored(daily, suwar);
+              return;
+            }
+            imported = readLocalStorageState();
+            adoptStored(imported.daily, imported.suwar);
+            store.put(state, "daily");
+            store.put(suwarState, "suwar");
+          }))
+          .then(() => {
+            if (!imported?.fromLegacy) return;
+            mirrorToLocalStorage();
+            try { localStorage.removeItem(progressStorageKey); } catch (_) {}
+          })
+          .catch(() => {
+            enterMemoryMode();
+            const local = readLocalStorageState();
+            adoptStored(local.daily, local.suwar);
+          });
+      });
+    }
+
+    function enqueueJob(job) {
+      const run = jobs.then(job);
+      jobs = run.catch(() => {});
+      return run;
+    }
+
+    function enterMemoryMode() {
+      if (storageMode === "memory") return;
+      storageMode = "memory";
+      storageGeneration += 1;
     }
 
     // Takes stored records as the state and redraws: in place on the same day (the deck, focus and any pending
@@ -1682,33 +1702,39 @@
     // tabs, so none works on a stale copy. Other tabs hear of each commit on the BroadcastChannel. If the database
     // fails, the session carries on in memory, which is then never replaced by a read.
     function withState(operation, { skipOnNewDay = false } = {}) {
-      let applied = false;
-      const apply = (daily, suwar) => {
-        applied = true;
-        const newDay = refreshFrom(daily, suwar);
-        if (!(newDay && skipOnNewDay)) operation();
-        state.counts = progress;
-      };
-      const inMemory = () => {
-        storageMode = "memory";
-        if (!applied) apply(state, suwarState);
-        mirrorToLocalStorage();
-      };
-      if (storageMode === "memory") {
-        inMemory();
-        return Promise.resolve();
-      }
-      return openDatabase()
-        .then(db => runTransaction(db, "readwrite", (daily, suwar, store) => {
-          apply(daily, suwar);
-          store.put(state, "daily");
-          store.put(suwarState, "suwar");
-        }))
-        .then(() => {
+      return enqueueJob(() => {
+        let applied = false;
+        const apply = (daily, suwar) => {
+          applied = true;
+          const newDay = refreshFrom(daily, suwar);
+          if (!(newDay && skipOnNewDay)) operation();
+          state.counts = progress;
+        };
+        // A failure before `apply` leaves the operation to run on memory; after it (a put that fails, an abort), the
+        // operation has already run once, on the latest committed state, and memory keeps that result.
+        const inMemory = () => {
+          enterMemoryMode();
+          if (!applied) apply(state, suwarState);
           mirrorToLocalStorage();
-          stateChannel?.postMessage("changed");
-        })
-        .catch(inMemory);
+        };
+        if (storageMode === "memory") {
+          inMemory();
+          return undefined;
+        }
+        const generation = storageGeneration;
+        return openDatabase()
+          .then(db => runTransaction(db, "readwrite", (daily, suwar, store) => {
+            if (generation !== storageGeneration) throw new Error("storage fell back to memory");
+            apply(daily, suwar);
+            store.put(state, "daily");
+            store.put(suwarState, "suwar");
+          }))
+          .then(() => {
+            mirrorToLocalStorage();
+            stateChannel?.postMessage("changed");
+          })
+          .catch(inMemory);
+      });
     }
 
     function todayIsRecorded() {
@@ -2617,10 +2643,15 @@
     // Another tab committed a change: reread it (read-only) and redraw as refreshFrom does. A session in memory keeps
     // its own state.
     stateChannel?.addEventListener("message", () => {
-      if (storageMode !== "idb" || !state) return;
-      openDatabase()
-        .then(db => runTransaction(db, "readonly", (daily, suwar) => refreshFrom(daily, suwar)))
-        .catch(() => {});
+      enqueueJob(() => {
+        if (storageMode !== "idb" || !state) return undefined;
+        const generation = storageGeneration;
+        return openDatabase()
+          .then(db => runTransaction(db, "readonly", (daily, suwar) => {
+            if (generation === storageGeneration && storageMode === "idb") refreshFrom(daily, suwar);
+          }))
+          .catch(() => {});
+      });
     });
 
     themeSelect.addEventListener("change", () => {
