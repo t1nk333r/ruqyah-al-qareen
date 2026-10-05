@@ -1357,7 +1357,7 @@
     const suwarStorageKey = "ruqyah-suwar-v1";
     const dbName = "ruqyah";
     const dbStoreName = "state";
-    // Shown once when the database fails: the session then writes nothing (enterMemoryMode).
+    // Shown once when the database fails: the session then writes no progress (enterMemoryMode).
     const memoryNotice = "تعذّر حفظ التقدم على هذا الجهاز؛ ستبقى القراءات ظاهرة حتى إغلاق الصفحة.";
     const historyLimit = 30;
     const hapticsStorageKey = "ruqyah-haptics";
@@ -1971,7 +1971,6 @@
 
     function countFor(segment) { return progress[segment.id] ?? 0; }
     function isComplete(segment) { return countFor(segment) >= segment.repeat; }
-    function allComplete() { return segments.every(isComplete); }
     function suraIsComplete(sura) { return sura.segments.every(isComplete); }
     function suraOf(segment) {
       const end = segment.id.indexOf("-");
