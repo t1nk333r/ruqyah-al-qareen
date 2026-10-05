@@ -1670,58 +1670,20 @@
       return next;
     }
 
-    // v21 (7be3d1a) and v22 (706d85f) kept the changes of a session that could not use the database in localStorage:
-    // v21 one ruqyah-unsynced-v1:<id> snapshot { startedAt, base, daily, suwar } per session, v22 one ruqyah-op-v1 key
-    // per operation; a later load merged them, recording what it had merged in the database records "reconciled"
-    // (v21) and "appliedOps" (v22). This build writes none of them. What is left is folded in once, conservatively:
-    // only today's readings, only as increases (a snapshot's counts above its base, a v22 count operation), capped at
-    // each segment's repeat through applyOp, so completions are recorded; resets and other days are ignored. Entries
-    // already merged ("reconciled", "appliedOps") add nothing. The folded keys are listed in the record
-    // "legacyFolded" in the same transaction, so a key that outlives its removal (the page closed first) is never
-    // folded twice; the list goes once no leftover key remains.
+    // v21 (7be3d1a) and v22 (706d85f) kept a memory session's readings under these keys and records. They were never
+    // committed, an accepted loss (v21 also put them in the mirror, which an empty database imports): deleted unread.
     const leftoverPrefixes = ["ruqyah-op-v1:", "ruqyah-unsynced-v1:"];
     const leftoverRecords = ["journal", "appliedOps", "reconciled", "legacyFolded"];
 
-    function readLeftoverKeys() {
-      const entries = [];
+    function leftoverKeys() {
+      const keys = [];
       try {
         for (let i = 0; i < localStorage.length; i += 1) {
           const key = localStorage.key(i);
-          if (!leftoverPrefixes.some(prefix => key?.startsWith(prefix))) continue;
-          let value = null;
-          try { value = JSON.parse(localStorage.getItem(key)); } catch (_) {}
-          entries.push({ key, value });
+          if (leftoverPrefixes.some(prefix => key?.startsWith(prefix))) keys.push(key);
         }
       } catch (_) {}
-      return entries;
-    }
-
-    // The count operations of today the leftover entries add, oldest first, without those already merged.
-    function leftoverCounts(entries, stored, today) {
-      const applied = stored.appliedOps && typeof stored.appliedOps === "object" ? stored.appliedOps : {};
-      const reconciled = Array.isArray(stored.reconciled) ? stored.reconciled : [];
-      const folded = Array.isArray(stored.legacyFolded) ? stored.legacyFolded : [];
-      const ops = [];
-      for (const { key, value } of entries) {
-        if (folded.includes(key) || !value || typeof value !== "object") continue;
-        if (key.startsWith("ruqyah-op-v1:")) {
-          if (Object.hasOwn(applied, value.id) || value.kind !== "count" || value.date !== today ||
-              !Object.hasOwn(segmentById, value.segment) || !Number.isFinite(value.t)) continue;
-          ops.push({ kind: "count", segment: value.segment, t: value.t });
-        } else {
-          // v22 imported a snapshot as operations "<key>:<segment>:<n>" (appliedOps); v21 listed it in "reconciled".
-          if (reconciled.includes(key) || Object.keys(applied).some(id => id.startsWith(`${key}:`))) continue;
-          if (value.daily?.date !== today) continue;
-          const counts = normalizeCounts(value.daily.counts);
-          const base = value.base?.daily?.date === today ? normalizeCounts(value.base.daily.counts) : emptyCounts();
-          const startedAt = Date.parse(value.startedAt);
-          const t = Number.isFinite(startedAt) ? startedAt : Date.now();
-          for (const segment of segments) {
-            for (let n = base[segment.id]; n < counts[segment.id]; n += 1) ops.push({ kind: "count", segment: segment.id, t });
-          }
-        }
-      }
-      return ops.sort((a, b) => a.t - b.t);
+      return keys;
     }
 
     // Database "ruqyah", object store "state", records "daily" (ruqyah-daily-v1's shape) and "suwar" (ruqyah-suwar-v1's).
@@ -1772,37 +1734,29 @@
     }
 
     // First read, in one readwrite transaction. An empty database is filled from localStorage, so two tabs opening at
-    // once import once; leftover v21/v22 entries are folded in (readLeftoverKeys). The legacy progress key and the
-    // folded keys are removed only after the commit. When IndexedDB cannot be used (private mode, quota) the session
-    // shows the localStorage copy and runs in memory.
+    // once import once; the legacy progress key is removed only after the commit, with the v21/v22 leftovers. When
+    // IndexedDB cannot be used (private mode, quota) the session shows the localStorage copy and runs in memory.
     function initStore() {
       return enqueueJob(() => {
         const today = localDateKey();
-        const leftovers = readLeftoverKeys();
         let records = null;
-        let changed = false;
+        let imported = false;
         return openDatabase()
           .then(db => runTransaction(db, "readwrite", (read, store) => {
-            const imported = read.daily === undefined ? readLocalStorageState() : null;
-            const stored = imported ?? read;
+            imported = read.daily === undefined;
+            const stored = imported ? readLocalStorageState() : read;
             records = normalizeRecords(stored.daily, stored.suwar, today);
-            for (const op of leftoverCounts(leftovers, read, today)) records = applyOp(records, op);
-            const hasLeftovers = leftoverRecords.some(key => read[key] !== undefined) || leftovers.length > 0;
-            changed = Boolean(imported) || hasLeftovers;
-            if (!changed) return;
-            putRecords(store, records);
-            for (const key of ["journal", "appliedOps", "reconciled"]) store.delete(key);
-            if (leftovers.length) store.put(leftovers.map(entry => entry.key), "legacyFolded");
-            else store.delete("legacyFolded");
+            if (imported) putRecords(store, records);
+            for (const key of leftoverRecords) if (read[key] !== undefined) store.delete(key);
           }, ["daily", "suwar", ...leftoverRecords]))
           .then(() => {
             showRecords(records);
-            if (changed) mirrorToLocalStorage(records);
+            if (imported) mirrorToLocalStorage(records);
             try {
               localStorage.removeItem(progressStorageKey);
-              for (const { key } of leftovers) localStorage.removeItem(key);
+              for (const key of leftoverKeys()) localStorage.removeItem(key);
             } catch (_) {}
-            if (changed) {
+            if (imported) {
               try { stateChannel?.postMessage("changed"); } catch (_) {}
             }
           }, error => {
@@ -1819,9 +1773,10 @@
       return run;
     }
 
-    // For the rest of the session the page counts on what it shows and writes nothing, neither the database nor the
-    // localStorage copy, so nothing stored is ever replaced by it; a reload tries the database again. The readings of
-    // the session are lost when the page closes, which the notice says once.
+    // For the rest of the session the page counts on what it shows and writes no progress, neither the database nor
+    // the localStorage copy, so nothing stored is ever replaced by it; a reload tries the database again. Preferences
+    // (theme, text size, haptics) and the install onboarding key are still saved. The readings of the session are lost
+    // when the page closes, which the notice says once.
     function enterMemoryMode(error) {
       if (error) console.error(error);
       if (storageMode === "memory") return;
@@ -1915,7 +1870,7 @@
     }
 
     // Another tab committed a change, or this page may have missed one (back from the background or the bfcache):
-    // reread (read-only) and redraw. A session in memory keeps what it shows.
+    // reread (read-only) and redraw. A session in memory keeps what it shows; a failed reread starts memory mode.
     function refreshFromStore() {
       return enqueueJob(() => {
         if (!state || storageMode !== "idb") return undefined;
@@ -1930,7 +1885,7 @@
             if (!records) return;
             showRecords(records);
             paintSafely(() => redrawState(state.date !== previousDate));
-          }, error => console.error(error));
+          }, enterMemoryMode);
       });
     }
 
