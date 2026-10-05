@@ -2,7 +2,7 @@
 
 // Both apps share the origin (t1nk333r.github.io) and so CacheStorage: only caches with this prefix are this app's.
 const CACHE_PREFIX = "ruqyah-static-";
-const CACHE_NAME = `${CACHE_PREFIX}v22`;
+const CACHE_NAME = `${CACHE_PREFIX}v23`;
 // Navigations are answered from the network and fall back to ./index.html, so "./" is never read from the cache.
 const APP_SHELL = [
   "./index.html",

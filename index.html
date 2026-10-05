@@ -1357,13 +1357,8 @@
     const suwarStorageKey = "ruqyah-suwar-v1";
     const dbName = "ruqyah";
     const dbStoreName = "state";
-    // A session that cannot use the database writes each change once, under its own key ruqyah-op-v1:<session>:<seq>;
-    // the next load that can use it applies each operation exactly once (the database record "appliedOps").
-    const opKeyPrefix = "ruqyah-op-v1:";
-    // 7be3d1a's memory sessions, imported once (readLegacyUnsynced).
-    const legacyUnsyncedPrefix = "ruqyah-unsynced-v1:";
-    const opReplayDays = 365;
-    const appliedOpDays = 400;
+    // Shown once when the database fails: the session then writes nothing (enterMemoryMode).
+    const memoryNotice = "تعذّر حفظ التقدم على هذا الجهاز؛ ستبقى القراءات ظاهرة حتى إغلاق الصفحة.";
     const historyLimit = 30;
     const hapticsStorageKey = "ruqyah-haptics";
     const themeStorageKey = "ruqyah-theme";
@@ -1444,13 +1439,6 @@
     let suwarState = null;
     let storageMode = "idb";
     let dbPromise = null;
-    // The database as this page last read or committed it ({ daily, suwar, journal, applied }), or the localStorage
-    // mirror when it never opened: the base a session in memory shows its pending operations on (memoryRecords).
-    let lastStored = null;
-    const sessionId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-    let opSequence = 0;
-    // The operations this session made in memory, kept here as well in case localStorage refuses them.
-    const sessionOps = [];
     // This page's progress jobs (first read, each change, each refresh after another tab's commit) run one after
     // another: a job starts only when the one before it has committed or fallen back to memory, and decides then
     // whether to use the database. Only jobs switch to memory, so no job ever sees the mode change under it.
@@ -1540,11 +1528,10 @@
     }
 
     // Earlier builds read only localStorage, so each database commit is copied there, best effort; the copy is read
-    // back only to fill an empty database or as the base of a session that never opened it. It never holds an
-    // operation the database has not applied: a session in memory writes only its ruqyah-op-v1 keys. A tab still
-    // running an earlier build reads and writes only localStorage: it sees this build's progress when it reloads
-    // (and, from 383edf9 on, through the storage event), but what it counts itself never reaches the database or the
-    // other tabs, and this build's next commit overwrites it there.
+    // back only to fill an empty database or to show something in a session that cannot open it, which writes
+    // nothing. A tab still running an earlier build reads and writes only localStorage: it sees this build's progress
+    // when it reloads (and, from 383edf9 on, through the storage event), but what it counts itself never reaches the
+    // database or the other tabs, and this build's next commit overwrites it there.
     function mirrorToLocalStorage(records) {
       try {
         localStorage.setItem(dailyStorageKey, JSON.stringify(records.daily));
@@ -1641,29 +1628,15 @@
     }
 
     const segmentById = Object.fromEntries(segments.map(segment => [segment.id, segment]));
-    const opKinds = new Set(["count", "resetSegment", "resetDay", "resetWeek", "resetAll"]);
-
-    // An operation: { id, t (Date.now()), date (the local day it was made on), kind, segment (count, resetSegment) }.
-    function isValidOp(op) {
-      return Boolean(op) && typeof op === "object" && typeof op.id === "string" && Number.isFinite(op.t) &&
-        typeof op.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(op.date) && isRealDate(op.date) && opKinds.has(op.kind) &&
-        (op.kind !== "count" && op.kind !== "resetSegment" || Object.hasOwn(segmentById, op.segment));
-    }
-
-    function compareOps(a, b) {
-      return a.t - b.t || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-    }
 
     function clearDay(records) {
       for (const segment of segments) records.daily.counts[segment.id] = 0;
       for (const sura of RUQYAH_SUWAR) records.suwar.completedAt[sura.id] = null;
     }
 
-    // The one reducer: every change to progress, made now or replayed from a session that ran in memory, is an
-    // operation applied here to the records of its own day ({ daily, suwar }, as normalizeRecords returns them).
-    // Returns new records. A reading that completes a segment completes its sura and, with every other segment, the
-    // day, at the operation's instant. Resets keep the day's record (spec §8); the week and everything also delete
-    // history up to the operation's day (a later day, met when an operation is replayed late, stays).
+    // The one reducer: every change to progress ({ kind, segment, t }) applied to today's records ({ daily, suwar },
+    // as normalizeRecords returns them); returns new records. A reading that completes a segment completes its sura
+    // and, with every other segment, the day, at the operation's instant. Resets keep the day's record (spec §8).
     function applyOp(records, op) {
       const next = structuredClone(records);
       const { daily, suwar } = next;
@@ -1690,156 +1663,69 @@
         }
         clearDay(next);
       } else if (op.kind === "resetAll") {
-        daily.history = Object.fromEntries(Object.entries(daily.history).filter(([date]) => date > daily.date));
-        suwar.history = Object.fromEntries(Object.entries(suwar.history).filter(([date]) => date > daily.date));
+        daily.history = {};
+        suwar.history = {};
         clearDay(next);
       }
       return next;
     }
 
-    // Today's progress is a journal: `base`, the records at the start of the day (or when this build first saw
-    // them), and `ops`, today's operations. The stored records are always the journal folded in (t, id) order, so an
-    // operation replayed late takes its place among the others: a reset made before another tab's readings does not
-    // undo them, and one made after them does. On a new day the journal folds into the next day's base.
-    function foldJournal(journal) {
-      return [...journal.ops].sort(compareOps).reduce(applyOp, journal.base);
-    }
+    // v21 (7be3d1a) and v22 (706d85f) kept the changes of a session that could not use the database in localStorage:
+    // v21 one ruqyah-unsynced-v1:<id> snapshot { startedAt, base, daily, suwar } per session, v22 one ruqyah-op-v1 key
+    // per operation; a later load merged them, recording what it had merged in the database records "reconciled"
+    // (v21) and "appliedOps" (v22). This build writes none of them. What is left is folded in once, conservatively:
+    // only today's readings, only as increases (a snapshot's counts above its base, a v22 count operation), capped at
+    // each segment's repeat through applyOp, so completions are recorded; resets and other days are ignored. Entries
+    // already merged ("reconciled", "appliedOps") add nothing. The folded keys are listed in the record
+    // "legacyFolded" in the same transaction, so a key that outlives its removal (the page closed first) is never
+    // folded twice; the list goes once no leftover key remains.
+    const leftoverPrefixes = ["ruqyah-op-v1:", "ruqyah-unsynced-v1:"];
+    const leftoverRecords = ["journal", "appliedOps", "reconciled", "legacyFolded"];
 
-    // FNV-1a of the records as stored: tells whether anything but this build wrote them since.
-    function recordsStamp(daily, suwar) {
-      const text = JSON.stringify([daily, suwar]);
-      let hash = 0x811c9dc5;
-      for (let i = 0; i < text.length; i += 1) hash = Math.imul(hash ^ text.charCodeAt(i), 0x01000193) >>> 0;
-      return `${text.length}:${hash.toString(16)}`;
-    }
-
-    // The stored journal while the stored records are what it produced. Otherwise (first run, the mirror, or an
-    // earlier build wrote the records) a new journal based on the records as they are, so none of their writes is lost.
-    function journalFrom(stored, today) {
-      const journal = stored.journal;
-      if (stored.daily !== undefined && journal && typeof journal === "object" && Array.isArray(journal.ops) &&
-          journal.base && typeof journal.date === "string" && journal.stamp === recordsStamp(stored.daily, stored.suwar)) {
-        return { date: journal.date, base: journal.base, ops: journal.ops.filter(isValidOp) };
-      }
-      const raw = stored.daily;
-      const date = raw && typeof raw === "object" && typeof raw.date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw.date) && isRealDate(raw.date) ? raw.date : today;
-      return { date, base: normalizeRecords(stored.daily, stored.suwar, date), ops: [] };
-    }
-
-    function rollJournal(journal, date) {
-      const folded = foldJournal(journal);
-      return { date, base: normalizeRecords(folded.daily, folded.suwar, date), ops: [] };
-    }
-
-    // An operation of a day the journal has already closed (the records moved past it before it was replayed). That
-    // day's partial counts are gone, so they are rebuilt from what history kept (a completed sura's segments, every
-    // segment of a completed day) plus the operations replayed with it; only that day's history records change.
-    function applyPastOp(base, op, pastDays) {
-      const date = op.date;
-      let day = pastDays.get(date);
-      if (!day) {
-        const completedAt = { ...emptySuwarState(date).completedAt, ...(base.suwar.history[date] ?? {}) };
-        const dayDone = Boolean(base.daily.history[date]);
-        const counts = Object.fromEntries(segments.map(segment =>
-          [segment.id, dayDone || completedAt[suraOf(segment).id] ? segment.repeat : 0]));
-        day = { counts, completedAt };
-      }
-      const after = applyOp({
-        daily: { date, counts: day.counts, history: base.daily.history },
-        suwar: { date, completedAt: day.completedAt, history: base.suwar.history }
-      }, op);
-      pastDays.set(date, { counts: after.daily.counts, completedAt: after.suwar.completedAt });
-      const completed = Object.fromEntries(Object.entries(after.suwar.completedAt).filter(([, at]) => at));
-      const suwarHistory = { ...after.suwar.history };
-      if (Object.keys(completed).length) suwarHistory[date] = completed;
-      else delete suwarHistory[date];
-      return { daily: { ...base.daily, history: after.daily.history }, suwar: { ...base.suwar, history: trimSuwarHistory(suwarHistory) } };
-    }
-
-    // Adds `ops` (any days, any order) to the journal and brings it to `today`. An operation of a later day closes
-    // the journal's day first; one older than opReplayDays is dropped.
-    function replayOps(journal, ops, today) {
-      let next = { ...journal, ops: [...journal.ops] };
-      const oldest = shiftDate(today, -opReplayDays);
-      const pastDays = new Map();
-      for (const op of [...ops].sort(compareOps)) {
-        if (op.date < oldest || next.ops.some(other => other.id === op.id)) continue;
-        if (op.date > next.date) next = rollJournal(next, op.date);
-        if (op.date === next.date) next.ops.push(op);
-        else next.base = applyPastOp(next.base, op, pastDays);
-      }
-      next.ops.sort(compareOps);
-      return next.date === today ? next : rollJournal(next, today);
-    }
-
-    // Puts the journal and the records it folds to; returns both, as the database now holds them.
-    function putJournal(store, journal) {
-      const records = foldJournal(journal);
-      const stored = { date: journal.date, base: journal.base, ops: journal.ops, stamp: recordsStamp(records.daily, records.suwar) };
-      store.put(records.daily, "daily");
-      store.put(records.suwar, "suwar");
-      store.put(stored, "journal");
-      return { records, journal: stored };
-    }
-
-    // appliedOps: { opId: date } for every ruqyah-op-v1 key already applied, so that a key surviving its removal (the
-    // page closed first) is never applied twice. An id goes after appliedOpDays: its key could not be replayed then
-    // anyway, as operations older than opReplayDays are dropped.
-    function appliedFrom(raw) {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return {};
-      return Object.fromEntries(Object.entries(raw).filter(([, date]) => typeof date === "string"));
-    }
-
-    // Every ruqyah-op-v1 key and the operations they hold (an unreadable key is listed for removal but applies nothing).
-    function readStoredOps() {
-      const keys = [];
-      const ops = [];
+    function readLeftoverKeys() {
+      const entries = [];
       try {
         for (let i = 0; i < localStorage.length; i += 1) {
           const key = localStorage.key(i);
-          if (!key?.startsWith(opKeyPrefix)) continue;
-          keys.push(key);
-          let op = null;
-          try { op = JSON.parse(localStorage.getItem(key)); } catch (_) {}
-          if (isValidOp(op)) ops.push(op);
+          if (!leftoverPrefixes.some(prefix => key?.startsWith(prefix))) continue;
+          let value = null;
+          try { value = JSON.parse(localStorage.getItem(key)); } catch (_) {}
+          entries.push({ key, value });
         }
       } catch (_) {}
-      return { keys, ops };
+      return entries;
     }
 
-    // 7be3d1a kept a session in memory as one ruqyah-unsynced-v1 snapshot beside the records it started from. Each is
-    // imported once, conservatively: the readings it added over that base on its day, as count operations with
-    // stable ids (its resets cannot be told apart from the counts).
-    function readLegacyUnsynced() {
-      const keys = [];
+    // The count operations of today the leftover entries add, oldest first, without those already merged.
+    function leftoverCounts(entries, stored, today) {
+      const applied = stored.appliedOps && typeof stored.appliedOps === "object" ? stored.appliedOps : {};
+      const reconciled = Array.isArray(stored.reconciled) ? stored.reconciled : [];
+      const folded = Array.isArray(stored.legacyFolded) ? stored.legacyFolded : [];
       const ops = [];
-      try {
-        for (let i = 0; i < localStorage.length; i += 1) {
-          const key = localStorage.key(i);
-          if (!key?.startsWith(legacyUnsyncedPrefix)) continue;
-          keys.push(key);
-          let entry = null;
-          try { entry = JSON.parse(localStorage.getItem(key)); } catch (_) {}
-          const date = entry?.daily?.date;
-          if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !isRealDate(date)) continue;
-          const counts = normalizeCounts(entry.daily.counts);
-          const base = entry.base?.daily;
-          const baseCounts = base && base.date === date ? normalizeCounts(base.counts) : emptyCounts();
-          const startedAt = Date.parse(entry.startedAt);
-          const t = Number.isFinite(startedAt) ? startedAt : 0;
+      for (const { key, value } of entries) {
+        if (folded.includes(key) || !value || typeof value !== "object") continue;
+        if (key.startsWith("ruqyah-op-v1:")) {
+          if (Object.hasOwn(applied, value.id) || value.kind !== "count" || value.date !== today ||
+              !Object.hasOwn(segmentById, value.segment) || !Number.isFinite(value.t)) continue;
+          ops.push({ kind: "count", segment: value.segment, t: value.t });
+        } else {
+          // v22 imported a snapshot as operations "<key>:<segment>:<n>" (appliedOps); v21 listed it in "reconciled".
+          if (reconciled.includes(key) || Object.keys(applied).some(id => id.startsWith(`${key}:`))) continue;
+          if (value.daily?.date !== today) continue;
+          const counts = normalizeCounts(value.daily.counts);
+          const base = value.base?.daily?.date === today ? normalizeCounts(value.base.daily.counts) : emptyCounts();
+          const startedAt = Date.parse(value.startedAt);
+          const t = Number.isFinite(startedAt) ? startedAt : Date.now();
           for (const segment of segments) {
-            for (let n = baseCounts[segment.id] + 1; n <= counts[segment.id]; n += 1) {
-              ops.push({ id: `${key}:${segment.id}:${n}`, t, date, kind: "count", segment: segment.id });
-            }
+            for (let n = base[segment.id]; n < counts[segment.id]; n += 1) ops.push({ kind: "count", segment: segment.id, t });
           }
         }
-      } catch (_) {}
-      return { keys, ops };
+      }
+      return ops.sort((a, b) => a.t - b.t);
     }
 
-    // Database "ruqyah", object store "state", records "daily" (ruqyah-daily-v1's shape) and "suwar" (ruqyah-suwar-v1's),
-    // which backups and the native importer read; "journal" (foldJournal) and "appliedOps" (appliedFrom). The
-    // connection closes when another tab needs to upgrade the database; the next operation reopens it. A version-1
+    // Database "ruqyah", object store "state", records "daily" (ruqyah-daily-v1's shape) and "suwar" (ruqyah-suwar-v1's).
+    // The connection closes when another tab needs to upgrade the database; the next operation reopens it. A version-1
     // open is never blocked: only an upgrade waits for other connections, and the one upgrade (from nothing) has none.
     function openDatabase() {
       if (!dbPromise) {
@@ -1859,12 +1745,10 @@
       return dbPromise;
     }
 
-    const storedKeys = ["daily", "suwar", "journal", "appliedOps"];
-
     // One transaction that reads `keys` and hands them to `onRead` ({ key: record }, store), which may put records
     // back. Everything happens in IndexedDB callbacks, so the transaction never waits on anything else; `onRead` does
     // no page work, which waits for the commit. Rejects when it aborts.
-    function runTransaction(db, mode, onRead, keys = storedKeys) {
+    function runTransaction(db, mode, onRead, keys = ["daily", "suwar"]) {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(dbStoreName, mode);
         const store = tx.objectStore(dbStoreName);
@@ -1882,61 +1766,49 @@
       });
     }
 
-    // First read, in one readwrite transaction. An empty database is filled from localStorage (so two tabs opening
-    // at once import once). Every ruqyah-op-v1 operation not yet in appliedOps (and each 7be3d1a ruqyah-unsynced-v1
-    // entry not yet merged) is replayed into the journal and recorded there; the keys, the legacy progress key and the
-    // entries are removed only after the commit. The keys are read before the transaction, so its callbacks stay
-    // synchronous; a key written meanwhile waits for the next load, and two loads that read the same keys apply them
-    // once, as their transactions run one after the other. When IndexedDB cannot be used (private mode, quota, a lost
-    // connection) the session runs in memory on the localStorage mirror.
+    function putRecords(store, records) {
+      store.put(records.daily, "daily");
+      store.put(records.suwar, "suwar");
+    }
+
+    // First read, in one readwrite transaction. An empty database is filled from localStorage, so two tabs opening at
+    // once import once; leftover v21/v22 entries are folded in (readLeftoverKeys). The legacy progress key and the
+    // folded keys are removed only after the commit. When IndexedDB cannot be used (private mode, quota) the session
+    // shows the localStorage copy and runs in memory.
     function initStore() {
       return enqueueJob(() => {
         const today = localDateKey();
-        const pending = readStoredOps();
-        const legacy = readLegacyUnsynced();
-        let committed = null;
+        const leftovers = readLeftoverKeys();
+        let records = null;
+        let changed = false;
         return openDatabase()
           .then(db => runTransaction(db, "readwrite", (read, store) => {
             const imported = read.daily === undefined ? readLocalStorageState() : null;
-            const stored = imported ? { daily: imported.daily, suwar: imported.suwar } : read;
-            const applied = appliedFrom(read.appliedOps);
-            const merged = Array.isArray(read.reconciled) ? read.reconciled : [];
-            const fresh = [...pending.ops, ...legacy.ops.filter(op => !merged.some(key => op.id.startsWith(`${key}:`)))]
-              .filter(op => !Object.hasOwn(applied, op.id));
-            for (const op of fresh) applied[op.id] = op.date;
-            const forgetBefore = shiftDate(today, -appliedOpDays);
-            let forgotten = false;
-            for (const [id, date] of Object.entries(applied)) {
-              if (date >= forgetBefore) continue;
-              delete applied[id];
-              forgotten = true;
-            }
-            const journal = replayOps(journalFrom(stored, today), fresh, today);
-            const changed = Boolean(imported) || fresh.length > 0 || forgotten || read.reconciled !== undefined;
-            if (!changed) {
-              committed = { changed, records: foldJournal(journal), stored: { ...read, applied } };
-              return;
-            }
-            const put = putJournal(store, journal);
-            store.put(applied, "appliedOps");
-            store.delete("reconciled");
-            committed = { changed, records: put.records, stored: { ...put.records, journal: put.journal, applied } };
-          }, [...storedKeys, "reconciled"]))
+            const stored = imported ?? read;
+            records = normalizeRecords(stored.daily, stored.suwar, today);
+            for (const op of leftoverCounts(leftovers, read, today)) records = applyOp(records, op);
+            const hasLeftovers = leftoverRecords.some(key => read[key] !== undefined) || leftovers.length > 0;
+            changed = Boolean(imported) || hasLeftovers;
+            if (!changed) return;
+            putRecords(store, records);
+            for (const key of ["journal", "appliedOps", "reconciled"]) store.delete(key);
+            if (leftovers.length) store.put(leftovers.map(entry => entry.key), "legacyFolded");
+            else store.delete("legacyFolded");
+          }, ["daily", "suwar", ...leftoverRecords]))
           .then(() => {
-            lastStored = committed.stored;
-            showRecords(committed.records);
-            if (committed.changed) mirrorToLocalStorage(committed.records);
+            showRecords(records);
+            if (changed) mirrorToLocalStorage(records);
             try {
               localStorage.removeItem(progressStorageKey);
-              for (const key of [...pending.keys, ...legacy.keys]) localStorage.removeItem(key);
+              for (const { key } of leftovers) localStorage.removeItem(key);
             } catch (_) {}
-            if (committed.changed) {
+            if (changed) {
               try { stateChannel?.postMessage("changed"); } catch (_) {}
             }
           }, error => {
-            console.error(error);
-            enterMemoryMode();
-            showRecords(memoryRecords());
+            const local = readLocalStorageState();
+            showRecords(normalizeRecords(local.daily, local.suwar, today));
+            enterMemoryMode(error);
           });
       });
     }
@@ -1947,28 +1819,16 @@
       return run;
     }
 
-    // For the rest of the session. A page that never read the database starts from the localStorage mirror.
-    function enterMemoryMode() {
+    // For the rest of the session the page counts on what it shows and writes nothing, neither the database nor the
+    // localStorage copy, so nothing stored is ever replaced by it; a reload tries the database again. The readings of
+    // the session are lost when the page closes, which the notice says once.
+    function enterMemoryMode(error) {
+      if (error) console.error(error);
+      if (storageMode === "memory") return;
       storageMode = "memory";
-      if (lastStored) return;
-      const local = readLocalStorageState();
-      lastStored = { daily: local.daily ?? undefined, suwar: local.suwar, journal: undefined, applied: {} };
-    }
-
-    // In memory the page shows its base (lastStored) with every operation not yet applied to it, from every session.
-    function memoryRecords() {
-      const today = localDateKey();
-      const ops = new Map();
-      for (const op of [...readStoredOps().ops, ...sessionOps]) {
-        if (!Object.hasOwn(lastStored.applied, op.id)) ops.set(op.id, op);
-      }
-      return foldJournal(replayOps(journalFrom(lastStored, today), [...ops.values()], today));
-    }
-
-    // Written once and never changed; kept in sessionOps too in case localStorage refuses it.
-    function saveOp(op) {
-      sessionOps.push(op);
-      try { localStorage.setItem(`${opKeyPrefix}${op.id}`, JSON.stringify(op)); } catch (_) {}
+      // After the tap's own announcement, which would otherwise replace it at once.
+      setTimeout(() => { liveRegion.textContent = memoryNotice; }, 700);
+      paintSafely(() => updateTodayStatus(segments.reduce((sum, segment) => sum + countFor(segment), 0)));
     }
 
     // Redraws after showRecords: in place on the same day (the deck, focus and any pending auto-advance stay), or from
@@ -2007,26 +1867,24 @@
     }
 
     // Every change to progress is an operation ({ kind, segment }) given to withState. With the database it is one
-    // readwrite transaction that rereads the records and the journal, replays the operation into the journal through
-    // applyOp and puts the result; the browser runs such transactions one at a time across tabs, so none works on a
-    // stale copy. Other tabs hear of each commit on the BroadcastChannel. The page work, show(before, after) (dialogs,
-    // haptics, announcements), runs after the commit with the redraw, so it can neither undo nor block the save. If
-    // the database fails, the session carries on in memory: the operation is written once under its own ruqyah-op-v1
-    // key, which the next load that can use the database applies exactly once. `tappedOn`: the day a tap was made on;
-    // a tap that runs on another day is dropped. A null operation only brings the records to today.
+    // readwrite transaction that rereads both records, applies the operation (applyOp) and puts the result; the
+    // browser runs such transactions one at a time across tabs, so none works on a stale copy. Other tabs hear of each
+    // commit on the BroadcastChannel. The page work, show(before, after) (dialogs, haptics, announcements), runs after
+    // the commit with the redraw, so it can neither undo nor block the save. If the database fails, the operation is
+    // applied to what the page shows and the session goes on in memory (enterMemoryMode). `tappedOn`: the day a tap
+    // was made on; a tap that runs on another day is dropped. A null operation only brings the records to today.
     function withState(operation, { tappedOn = null, show = null } = {}) {
       return enqueueJob(() => {
         const today = localDateKey();
         const previousDate = state.date;
-        const op = operation && (tappedOn === null || tappedOn === today)
-          ? { id: `${sessionId}:${opSequence++}`, t: Date.now(), date: today, ...operation }
-          : null;
+        const op = operation && (tappedOn === null || tappedOn === today) ? { ...operation, t: Date.now() } : null;
+        const change = records => {
+          const before = normalizeRecords(records.daily, records.suwar, today);
+          return { before, after: op ? applyOp(before, op) : before };
+        };
         const inMemory = error => {
-          if (error) console.error(error);
-          enterMemoryMode();
-          const before = memoryRecords();
-          if (op) saveOp(op);
-          return { before, after: memoryRecords() };
+          enterMemoryMode(error);
+          return change({ daily: state, suwar: suwarState });
         };
         const result = storageMode === "memory"
           ? Promise.resolve(inMemory())
@@ -2034,14 +1892,14 @@
             .then(db => {
               let outcome = null;
               return runTransaction(db, "readwrite", (read, store) => {
-                const journal = replayOps(journalFrom(read, today), [], today);
-                const before = foldJournal(journal);
-                const put = putJournal(store, op ? replayOps(journal, [op], today) : journal);
-                outcome = { before, after: put.records, stored: { ...put.records, journal: put.journal, applied: appliedFrom(read.appliedOps) } };
+                // Only jobs fall back to memory and they run one at a time, so this guard never fires today; it
+                // keeps a transaction from writing after the session has stopped writing.
+                if (storageMode !== "idb") throw new Error("storage fell back to memory");
+                outcome = change(read);
+                putRecords(store, outcome.after);
               }).then(() => outcome);
             })
             .then(outcome => {
-              lastStored = outcome.stored;
               mirrorToLocalStorage(outcome.after);
               try { stateChannel?.postMessage("changed"); } catch (_) {}
               return outcome;
@@ -2057,27 +1915,22 @@
     }
 
     // Another tab committed a change, or this page may have missed one (back from the background or the bfcache):
-    // reread (read-only) and redraw. In memory, the base with every pending operation is shown again.
+    // reread (read-only) and redraw. A session in memory keeps what it shows.
     function refreshFromStore() {
       return enqueueJob(() => {
-        if (!state) return undefined;
+        if (!state || storageMode !== "idb") return undefined;
         const previousDate = state.date;
-        const redraw = records => {
-          showRecords(records);
-          paintSafely(() => redrawState(state.date !== previousDate));
-        };
-        if (storageMode === "memory") {
-          redraw(memoryRecords());
-          return undefined;
-        }
         const today = localDateKey();
         let records = null;
         return openDatabase()
           .then(db => runTransaction(db, "readonly", read => {
-            lastStored = { ...read, applied: appliedFrom(read.appliedOps) };
-            records = foldJournal(replayOps(journalFrom(read, today), [], today));
+            if (storageMode === "idb") records = normalizeRecords(read.daily, read.suwar, today);
           }))
-          .then(() => redraw(records), error => console.error(error));
+          .then(() => {
+            if (!records) return;
+            showRecords(records);
+            paintSafely(() => redrawState(state.date !== previousDate));
+          }, error => console.error(error));
       });
     }
 
@@ -2151,13 +2004,14 @@
       return completedAt && !Number.isNaN(completedAt.getTime()) ? timeFormatter.format(completedAt) : "";
     }
 
+    // In memory the line keeps the notice that the session is not saved.
     function updateTodayStatus(done) {
       const entry = state.history[state.date];
       const time = completionTime(entry);
-      todayStatus.textContent = entry
+      todayStatus.textContent = storageMode === "memory" ? memoryNotice : entry
         ? (time ? `تمت رقية اليوم في ${time}` : "تمت رقية اليوم")
         : `رقية اليوم: ${formatNumber(done)} من ${formatNumber(totalRepeats)} تكرارًا`;
-      todayStatus.classList.toggle("is-complete", Boolean(entry));
+      todayStatus.classList.toggle("is-complete", storageMode !== "memory" && Boolean(entry));
     }
 
     function countFor(segment) { return progress[segment.id] ?? 0; }
@@ -2961,10 +2815,6 @@
       focusShownCard();
     });
     stateChannel?.addEventListener("message", refreshFromStore);
-    // In memory, another session's operation shows here as soon as it is written.
-    addEventListener("storage", event => {
-      if (storageMode === "memory" && (event.key === null || event.key.startsWith(opKeyPrefix))) refreshFromStore();
-    });
 
     themeSelect.addEventListener("change", () => {
       const theme = themeSelect.value;
