@@ -1,6 +1,8 @@
 "use strict";
 
-const CACHE_NAME = "ruqyah-static-v20";
+// Both apps share the origin (t1nk333r.github.io) and so CacheStorage: only caches with this prefix are this app's.
+const CACHE_PREFIX = "ruqyah-static-";
+const CACHE_NAME = `${CACHE_PREFIX}v21`;
 // Navigations are answered from the network and fall back to ./index.html, so "./" is never read from the cache.
 const APP_SHELL = [
   "./index.html",
@@ -20,7 +22,9 @@ self.addEventListener("install", event => {
 self.addEventListener("activate", event => {
   event.waitUntil(
     caches.keys()
-      .then(keys => Promise.all(keys.filter(key => key !== CACHE_NAME).map(key => caches.delete(key))))
+      .then(keys => Promise.all(keys
+        .filter(key => key.startsWith(CACHE_PREFIX) && key !== CACHE_NAME)
+        .map(key => caches.delete(key))))
       .then(() => self.clients.claim())
   );
 });
@@ -28,6 +32,13 @@ self.addEventListener("activate", event => {
 self.addEventListener("message", event => {
   if (event.data?.type === "SKIP_WAITING") self.skipWaiting();
 });
+
+// The scope root and index.html (query and hash aside) are the app shell; any other navigation in scope (the
+// manifest, README.md, an icon opened in a tab) must not replace it.
+function isShellRequest(url) {
+  const scope = new URL(self.registration.scope).pathname;
+  return url.pathname === scope || url.pathname === `${scope}index.html`;
+}
 
 self.addEventListener("fetch", event => {
   const request = event.request;
@@ -39,9 +50,10 @@ self.addEventListener("fetch", event => {
     event.respondWith(
       fetch(request)
         .then(response => {
-          if (response.ok) {
+          const isHtml = (response.headers.get("content-type") ?? "").toLowerCase().startsWith("text/html");
+          if (response.ok && isHtml && isShellRequest(url)) {
             const copy = response.clone();
-            caches.open(CACHE_NAME).then(cache => cache.put("./index.html", copy));
+            event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.put("./index.html", copy)));
           }
           return response;
         })
@@ -56,7 +68,7 @@ self.addEventListener("fetch", event => {
       return fetch(request).then(response => {
         if (response.ok) {
           const copy = response.clone();
-          caches.open(CACHE_NAME).then(cache => cache.put(request, copy));
+          event.waitUntil(caches.open(CACHE_NAME).then(cache => cache.put(request, copy)));
         }
         return response;
       });

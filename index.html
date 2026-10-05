@@ -1357,6 +1357,10 @@
     const suwarStorageKey = "ruqyah-suwar-v1";
     const dbName = "ruqyah";
     const dbStoreName = "state";
+    // A session that fell back to memory keeps its progress under ruqyah-unsynced-v1:<id> until a later load merges it
+    // into the database; the ids merged so far are the database record "reconciled".
+    const unsyncedKeyPrefix = "ruqyah-unsynced-v1:";
+    const reconciledLimit = 50;
     const historyLimit = 30;
     const hapticsStorageKey = "ruqyah-haptics";
     const themeStorageKey = "ruqyah-theme";
@@ -1437,12 +1441,15 @@
     let suwarState = null;
     let storageMode = "idb";
     let dbPromise = null;
+    // The records the database holds as far as this page knows (last read or committed): the base a memory session's
+    // changes are measured from when they are merged back (mergeUnsyncedSession).
+    let lastStored = null;
+    // In memory mode, this session's ruqyah-unsynced-v1 entry: { key, startedAt, base, written }.
+    let unsynced = null;
     // This page's progress jobs (first read, each change, each refresh after another tab's commit) run one after
     // another: a job starts only when the one before it has committed or fallen back to memory, and decides then
-    // whether to use the database. storageGeneration changes when the session falls back to memory, and a callback
-    // from an older generation never adopts what it read.
+    // whether to use the database. Only jobs switch to memory, so no job ever sees the mode change under it.
     let jobs = Promise.resolve();
-    let storageGeneration = 0;
     const stateChannel = "BroadcastChannel" in window ? new BroadcastChannel("ruqyah-state") : null;
     let hapticsEnabled = true;
     try { hapticsEnabled = localStorage.getItem(hapticsStorageKey) !== "off"; } catch (_) {}
@@ -1526,15 +1533,122 @@
       suwarState = suwarFromStored(suwar);
     }
 
-    // Earlier builds read only localStorage, so each commit is copied there, best effort; it is never read back once
-    // the database holds the state. A tab still running an earlier build reads and writes only localStorage: it sees
-    // this build's progress when it reloads (and, from 383edf9 on, through the storage event), but what it counts
-    // itself never reaches the database or the other tabs, and this build's next commit overwrites it there.
+    // Earlier builds read only localStorage, so each commit is copied there, best effort; the copy is never read back
+    // once the database holds the state. A tab still running an earlier build reads and writes only localStorage: it
+    // sees this build's progress when it reloads (and, from 383edf9 on, through the storage event), but what it counts
+    // itself never reaches the database or the other tabs, and this build's next commit overwrites it there. A
+    // session in memory also writes its own ruqyah-unsynced-v1 entry, which no other tab overwrites.
     function mirrorToLocalStorage() {
       try {
         localStorage.setItem(dailyStorageKey, JSON.stringify(state));
         localStorage.setItem(suwarStorageKey, JSON.stringify(suwarState));
       } catch (_) {}
+      if (storageMode === "memory") saveUnsyncedSession();
+    }
+
+    function currentRecords() {
+      return JSON.parse(JSON.stringify({ daily: state, suwar: suwarState }));
+    }
+
+    // `base` is what the database held when the session left it ({ daily, suwar }, as stored).
+    function newUnsyncedSession(base) {
+      const key = `${unsyncedKeyPrefix}${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      return { key, startedAt: new Date().toISOString(), base: base ?? { daily: null, suwar: null }, written: null };
+    }
+
+    // Held while the page lives, so that a load in another tab leaves a live session's entry alone.
+    function holdUnsyncedLock(key) {
+      navigator.locks?.request(key, () => new Promise(() => {})).catch(() => {});
+    }
+
+    function saveUnsyncedSession() {
+      try {
+        // Without Web Locks another tab may have merged this entry and removed it: what it merged is in the database,
+        // so the session goes on from there under a new key.
+        if (unsynced.written !== null && localStorage.getItem(unsynced.key) === null) {
+          unsynced = newUnsyncedSession(JSON.parse(unsynced.written));
+          holdUnsyncedLock(unsynced.key);
+        }
+        const records = JSON.stringify({ daily: state, suwar: suwarState });
+        localStorage.setItem(unsynced.key, JSON.stringify({ startedAt: unsynced.startedAt, base: unsynced.base, ...JSON.parse(records) }));
+        unsynced.written = records;
+      } catch (_) {}
+    }
+
+    // Every ruqyah-unsynced-v1 entry, oldest session first; `valid` is false for an entry that cannot be read.
+    function readUnsyncedSessions() {
+      const sessions = [];
+      try {
+        for (let i = 0; i < localStorage.length; i += 1) {
+          const key = localStorage.key(i);
+          if (!key?.startsWith(unsyncedKeyPrefix)) continue;
+          let entry = null;
+          try { entry = JSON.parse(localStorage.getItem(key)); } catch (_) {}
+          const valid = Boolean(entry) && typeof entry === "object" && Boolean(entry.daily) && typeof entry.daily === "object";
+          sessions.push(valid
+            ? { key, valid, startedAt: String(entry.startedAt ?? ""), base: { daily: entry.base?.daily ?? null, suwar: entry.base?.suwar ?? null }, daily: entry.daily, suwar: entry.suwar ?? null }
+            : { key, valid, startedAt: "" });
+        }
+      } catch (_) {}
+      return sessions.sort((a, b) => a.startedAt.localeCompare(b.startedAt) || a.key.localeCompare(b.key));
+    }
+
+    function liveLockNames() {
+      if (!navigator.locks?.query) return Promise.resolve(new Set());
+      return navigator.locks.query()
+        .then(snapshot => new Set((snapshot.held ?? []).map(lock => lock.name)))
+        .catch(() => new Set());
+    }
+
+    // Stored records as adoptStored reads them for today (it sets state, progress and suwarState in passing).
+    function normalizedRecords(daily, suwar) {
+      adoptStored(daily, suwar);
+      return { daily: state, suwar: suwarState };
+    }
+
+    // Three-way merge: a side equal to the base changed nothing, so the other side stands; `both` decides otherwise.
+    function mergeValue(mine, theirs, base, both) {
+      const same = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+      if (same(mine, base)) return theirs;
+      if (same(theirs, base)) return mine;
+      return both(mine, theirs, base);
+    }
+
+    function mergeKeyed(mine, theirs, base, both) {
+      const merged = {};
+      for (const key of new Set([...Object.keys(mine), ...Object.keys(theirs)])) {
+        const value = mergeValue(mine[key], theirs[key], base[key], both);
+        if (value !== undefined && value !== null) merged[key] = value;
+      }
+      return merged;
+    }
+
+    // Both sides changed an instant: one that is gone was deleted, the other recorded again, so the recorded one stays;
+    // two instants keep the earlier.
+    const earlierInstant = (a, b) => (a == null ? b : b == null ? a : (a <= b ? a : b));
+
+    // Folds a memory session (`session`: its base and its last state) into the adopted database state, all three read
+    // for today. Counts: a side that went below the base was reset there, so the merge keeps that reset plus whatever
+    // the other side counted beyond the base (two resets keep the higher recount); otherwise both sides' readings
+    // since the base add up, to the repeat. Day history, sura completions and per-sura history merge per date and
+    // sura: an entry deleted on one side (a reset) and untouched on the other stays deleted; an entry added on either
+    // side stays. The result is normalised again, so a completion its counts do not confirm is dropped.
+    function mergeUnsyncedSession(session) {
+      const theirs = { daily: state, suwar: suwarState };
+      const base = normalizedRecords(session.base.daily, session.base.suwar);
+      const mine = normalizedRecords(session.daily, session.suwar);
+      const counts = {};
+      for (const segment of segments) {
+        counts[segment.id] = mergeValue(mine.daily.counts[segment.id], theirs.daily.counts[segment.id], base.daily.counts[segment.id],
+          (m, t, b) => (m < b && t < b ? Math.max(m, t) : Math.min(segment.repeat, m + t - b)));
+      }
+      const history = mergeKeyed(mine.daily.history, theirs.daily.history, base.daily.history,
+        (m, t) => (m == null ? t : t == null ? m : (m.completedAt <= t.completedAt ? m : t)));
+      const completedAt = mergeKeyed(mine.suwar.completedAt, theirs.suwar.completedAt, base.suwar.completedAt, earlierInstant);
+      const suwarHistory = mergeKeyed(mine.suwar.history, theirs.suwar.history, base.suwar.history,
+        (m, t, b) => (m == null ? t : t == null ? m : mergeKeyed(m, t, b ?? {}, earlierInstant)));
+      adoptStored({ date: theirs.daily.date, counts, history }, { date: theirs.suwar.date, completedAt, history: suwarHistory });
+      trimHistory();
     }
 
     function trimHistory() {
@@ -1601,8 +1715,10 @@
       return backfillSuwarCompletions(loaded);
     }
 
-    // Database "ruqyah", object store "state", records "daily" (ruqyah-daily-v1's shape) and "suwar" (ruqyah-suwar-v1's).
-    // The connection closes when another tab needs to upgrade the database; the next operation reopens it.
+    // Database "ruqyah", object store "state", records "daily" (ruqyah-daily-v1's shape), "suwar" (ruqyah-suwar-v1's)
+    // and "reconciled" (the ruqyah-unsynced-v1 keys already merged, newest last). The connection closes when another
+    // tab needs to upgrade the database; the next operation reopens it. A version-1 open is never blocked: only an
+    // upgrade waits for other connections, and the one upgrade (from nothing) has none.
     function openDatabase() {
       if (!dbPromise) {
         dbPromise = new Promise((resolve, reject) => {
@@ -1615,55 +1731,90 @@
             resolve(db);
           };
           request.onerror = () => reject(request.error);
-          request.onblocked = () => reject(new Error("IndexedDB open blocked"));
         });
         dbPromise.catch(() => { dbPromise = null; });
       }
       return dbPromise;
     }
 
-    // One transaction that reads both records and hands them to `onRead`, which may put records back. Everything
-    // happens in IndexedDB callbacks, so the transaction never waits on anything else. Rejects when it aborts.
-    function runTransaction(db, mode, onRead) {
+    // One transaction that reads `keys` and hands them to `onRead` ({ key: record }, store), which may put records
+    // back. Everything happens in IndexedDB callbacks, so the transaction never waits on anything else; `onRead` does
+    // no page work, which waits for the commit. Rejects when it aborts.
+    function runTransaction(db, mode, onRead, keys = ["daily", "suwar"]) {
       return new Promise((resolve, reject) => {
         const tx = db.transaction(dbStoreName, mode);
         const store = tx.objectStore(dbStoreName);
-        const daily = store.get("daily");
-        const suwar = store.get("suwar");
-        suwar.onsuccess = () => {
-          try { onRead(daily.result, suwar.result, store); } catch (_) { tx.abort(); }
+        const requests = keys.map(key => store.get(key));
+        requests.at(-1).onsuccess = () => {
+          try {
+            onRead(Object.fromEntries(keys.map((key, index) => [key, requests[index].result])), store);
+          } catch (error) {
+            console.error(error);
+            tx.abort();
+          }
         };
         tx.oncomplete = () => resolve();
-        tx.onabort = () => reject(tx.error);
+        tx.onabort = () => reject(tx.error ?? new Error("IndexedDB transaction aborted"));
       });
     }
 
     // First read. An empty database is filled from localStorage in that same transaction, so two tabs opening at once
-    // import once; the legacy key goes only after its counts are committed. When IndexedDB cannot be used (blocked,
-    // private mode, quota) the session runs in memory, started from localStorage when it can be read.
+    // import once; the legacy key goes only after its counts are committed. Otherwise the ruqyah-unsynced-v1 entries of
+    // memory sessions that have ended (their page holds no lock) are merged in, oldest first, in that transaction, and
+    // their keys recorded there, so an entry is merged once even if the page closes before removing it. When
+    // IndexedDB cannot be used (private mode, quota, a lost connection) the session runs in memory: it carries on the
+    // newest ended session's entry, or starts from the localStorage mirror.
     function initStore() {
       return enqueueJob(() => {
         let imported = null;
-        return openDatabase()
-          .then(db => runTransaction(db, "readwrite", (daily, suwar, store) => {
-            if (daily !== undefined) {
-              adoptStored(daily, suwar);
+        let ended = [];
+        let settled = [];
+        let merged = false;
+        return liveLockNames()
+          .then(live => {
+            ended = readUnsyncedSessions().filter(session => !live.has(session.key));
+            return openDatabase();
+          })
+          .then(db => runTransaction(db, "readwrite", ({ daily, suwar, reconciled }, store) => {
+            settled = ended.map(session => session.key);
+            if (daily === undefined) {
+              // Nothing was ever committed, so the mirror holds the latest of every session, those in memory too.
+              imported = readLocalStorageState();
+              adoptStored(imported.daily, imported.suwar);
+              store.put(state, "daily");
+              store.put(suwarState, "suwar");
               return;
             }
-            imported = readLocalStorageState();
-            adoptStored(imported.daily, imported.suwar);
+            const done = Array.isArray(reconciled) ? reconciled.filter(key => typeof key === "string") : [];
+            const pending = ended.filter(session => session.valid && !done.includes(session.key));
+            adoptStored(daily, suwar);
+            for (const session of pending) mergeUnsyncedSession(session);
+            if (!pending.length) return;
+            merged = true;
             store.put(state, "daily");
             store.put(suwarState, "suwar");
-          }))
+            store.put([...done, ...pending.map(session => session.key)].slice(-reconciledLimit), "reconciled");
+          }, ["daily", "suwar", "reconciled"]))
           .then(() => {
-            if (!imported?.fromLegacy) return;
-            mirrorToLocalStorage();
-            try { localStorage.removeItem(progressStorageKey); } catch (_) {}
+            lastStored = currentRecords();
+            if (imported?.fromLegacy || merged) mirrorToLocalStorage();
+            try {
+              localStorage.removeItem(progressStorageKey);
+              for (const key of settled) localStorage.removeItem(key);
+            } catch (_) {}
+            if (merged) stateChannel?.postMessage("changed");
           })
-          .catch(() => {
-            enterMemoryMode();
-            const local = readLocalStorageState();
-            adoptStored(local.daily, local.suwar);
+          .catch(error => {
+            console.error(error);
+            const resumed = ended.filter(session => session.valid).at(-1);
+            if (resumed) {
+              adoptStored(resumed.daily, resumed.suwar);
+              enterMemoryMode({ ...resumed, written: JSON.stringify({ daily: resumed.daily, suwar: resumed.suwar }) });
+            } else {
+              const local = readLocalStorageState();
+              adoptStored(local.daily, local.suwar);
+              enterMemoryMode(newUnsyncedSession({ daily: local.daily, suwar: local.suwar }));
+            }
           });
       });
     }
@@ -1674,66 +1825,121 @@
       return run;
     }
 
-    function enterMemoryMode() {
+    function enterMemoryMode(session) {
       if (storageMode === "memory") return;
       storageMode = "memory";
-      storageGeneration += 1;
+      unsynced = session;
+      holdUnsyncedLock(session.key);
     }
 
-    // Takes stored records as the state and redraws: in place on the same day (the deck, focus and any pending
-    // auto-advance stay), or from the start of the deck on a new day. Returns whether the day changed.
-    function refreshFrom(daily, suwar) {
+    // Takes stored records as the state, no page work. Returns whether the day changed.
+    function adoptRecords(daily, suwar) {
       const previousDate = state.date;
       adoptStored(daily, suwar);
-      if (state.date !== previousDate) {
+      return state.date !== previousDate;
+    }
+
+    // Redraws after adoptRecords: in place on the same day (the deck, focus and any pending auto-advance stay), or
+    // from the start of the deck on a new day.
+    function redrawState(newDay) {
+      if (newDay) {
         startNewDay();
-        return true;
+        return;
       }
+      keepDeckLock();
       selectedSura().segments.forEach((segment, index) => updateCard(segment, index));
       updateDeckNavigation();
       updateSessionProgress();
       updateHistoryView();
-      return false;
+    }
+
+    // Page work after a commit: a rendering error is logged and can no longer undo or block the save.
+    function paintSafely(paint) {
+      try { paint(); } catch (error) { console.error(error); }
+    }
+
+    // The «التالي» lock: no sura shows a card past its first incomplete one. Another tab's reset can break it; the
+    // shown sura then moves back to that card, and any other reopens there.
+    function keepDeckLock() {
+      for (const [id, index] of Object.entries(suraIndices)) {
+        const blocking = suraById[id].segments.findIndex(segment => !isComplete(segment));
+        if (blocking === -1 || index <= blocking) continue;
+        if (id !== selectedSuraId) {
+          delete suraIndices[id];
+          continue;
+        }
+        const hadFocus = list.contains(document.activeElement);
+        showCard(blocking, "back", true);
+        if (hadFocus) focusShownCard();
+      }
     }
 
     // Every change to progress (counting with its day and sura completions, the resets, rollover) is one operation
     // here. In IndexedDB it is a single readwrite transaction that rereads both records, applies `operation` to them
-    // (changing memory and the page) and puts the result; the browser runs such transactions one at a time across
-    // tabs, so none works on a stale copy. Other tabs hear of each commit on the BroadcastChannel. If the database
-    // fails, the session carries on in memory, which is then never replaced by a read.
-    function withState(operation, { skipOnNewDay = false } = {}) {
+    // in memory and puts the result; the browser runs such transactions one at a time across tabs, so none works on a
+    // stale copy. `operation` changes only the state and returns the page work (dialogs, haptics, announcements), which
+    // runs after the commit with the redraw. Other tabs hear of each commit on the BroadcastChannel. If the database
+    // fails, the session carries on in memory, which is then never replaced by a read; its ruqyah-unsynced-v1 entry is
+    // merged into the database at a later load. `tappedOn`, the local day a tap was made on: a tap that finds another
+    // day (a new one in the records, or memory rolled at midnight while it waited) is not counted.
+    function withState(operation, { tappedOn = null } = {}) {
       return enqueueJob(() => {
+        let read = null;
         let applied = false;
+        let newDay = false;
+        let showChange = null;
         const apply = (daily, suwar) => {
           applied = true;
-          const newDay = refreshFrom(daily, suwar);
-          if (!(newDay && skipOnNewDay)) operation();
+          newDay = adoptRecords(daily, suwar);
+          if (tappedOn === null || (!newDay && state.date === tappedOn)) showChange = operation() ?? null;
           state.counts = progress;
         };
         // A failure before `apply` leaves the operation to run on memory; after it (a put that fails, an abort), the
-        // operation has already run once, on the latest committed state, and memory keeps that result.
-        const inMemory = () => {
-          enterMemoryMode();
+        // operation has already run once, on the latest committed state, and memory keeps that result. The database
+        // still holds what this transaction read, or else what this page last read or committed.
+        const inMemory = error => {
+          if (error) console.error(error);
+          enterMemoryMode(newUnsyncedSession(read ?? lastStored));
           if (!applied) apply(state, suwarState);
           mirrorToLocalStorage();
         };
+        const paint = () => paintSafely(() => {
+          redrawState(newDay);
+          showChange?.();
+        });
         if (storageMode === "memory") {
           inMemory();
+          paint();
           return undefined;
         }
-        const generation = storageGeneration;
         return openDatabase()
-          .then(db => runTransaction(db, "readwrite", (daily, suwar, store) => {
-            if (generation !== storageGeneration) throw new Error("storage fell back to memory");
+          .then(db => runTransaction(db, "readwrite", ({ daily, suwar }, store) => {
+            read = { daily, suwar };
             apply(daily, suwar);
             store.put(state, "daily");
             store.put(suwarState, "suwar");
           }))
           .then(() => {
+            lastStored = currentRecords();
             mirrorToLocalStorage();
-            stateChannel?.postMessage("changed");
-          })
-          .catch(inMemory);
+            try { stateChannel?.postMessage("changed"); } catch (_) {}
+          }, inMemory)
+          .then(paint);
+      });
+    }
+
+    // Another tab committed a change, or this page may have missed one (back from the background or the bfcache):
+    // reread the records (read-only) and redraw. A session in memory keeps its own state.
+    function refreshFromStore() {
+      return enqueueJob(() => {
+        if (storageMode !== "idb" || !state) return undefined;
+        let newDay = false;
+        return openDatabase()
+          .then(db => runTransaction(db, "readonly", ({ daily, suwar }) => {
+            lastStored = { daily, suwar };
+            newDay = adoptRecords(daily, suwar);
+          }))
+          .then(() => paintSafely(() => redrawState(newDay)), error => console.error(error));
       });
     }
 
@@ -1761,7 +1967,7 @@
     // On the midnight timer, focus and visibility: the new day in memory and on the page at once, then committed.
     function ensureCurrentDay() {
       if (!state || state.date === localDateKey()) return false;
-      refreshFrom(state, suwarState);
+      redrawState(adoptRecords(state, suwarState));
       withState(() => {});
       return true;
     }
@@ -1787,7 +1993,8 @@
     // completed sura (ruqyah-suwar-v1, not in the backup), as athkar index.html updateHistoryView. A full day shows its
     // time; any other day lists the suras completed on it.
     function updateHistoryView() {
-      if (!state) return;
+      // The list is in the settings sheet and is drawn when it opens; while closed, redraws skip it.
+      if (!state || !settingsDialog.open) return;
       const history = backupHistory(state.history);
       const pastDates = [...new Set([...Object.keys(history), ...Object.keys(suwarState.history)])]
         .filter(date => date < state.date).sort().reverse().slice(0, historyLimit);
@@ -1829,7 +2036,10 @@
     function isComplete(segment) { return countFor(segment) >= segment.repeat; }
     function allComplete() { return segments.every(isComplete); }
     function suraIsComplete(sura) { return sura.segments.every(isComplete); }
-    function suraOf(segment) { return suraById[segment.id.slice(0, segment.id.indexOf("-"))]; }
+    function suraOf(segment) {
+      const end = segment.id.indexOf("-");
+      return end > 0 ? suraById[segment.id.slice(0, end)] : undefined;
+    }
     function selectedSura() { return suraById[selectedSuraId]; }
     function activeSegments() { return selectedSura().segments; }
     function activeIndex() { return suraIndices[selectedSuraId] ?? 0; }
@@ -2061,26 +2271,32 @@
       list.querySelector("li:not([hidden]) .card-tap-target")?.focus({ preventScroll: true });
     }
 
-    // A tap that finds a new day starts it and is not counted.
+    // A tap is counted on the day it was made: one that finds another day starts it and is not counted.
     function countReading(segment, index) {
-      withState(() => recordReading(segment, index), { skipOnNewDay: true });
+      withState(() => recordReading(segment, index), { tappedOn: localDateKey() });
     }
 
+    // A withState operation: counts the reading with its sura and day completions, and returns the page work.
     function recordReading(segment, index) {
-      if (isComplete(segment)) return;
+      if (isComplete(segment)) return null;
       const next = countFor(segment) + 1;
       progress[segment.id] = next;
       const completesSegment = next >= segment.repeat;
-      if (completesSegment) triggerHaptic(hapticDurationMs);
       const sura = suraOf(segment);
       const completesSura = completesSegment && suraIsComplete(sura) && !suwarState.completedAt[sura.id];
       if (completesSura) suwarState.completedAt[sura.id] = new Date().toISOString();
+      const completesDay = allComplete();
+      if (completesDay) recordToday();
+      return () => showReading(segment, index, { completesSegment, completesSura, completesDay });
+    }
+
+    function showReading(segment, index, { completesSegment, completesSura, completesDay }) {
+      if (completesSegment) triggerHaptic(hapticDurationMs);
       updateCard(segment, index, true);
       updateDeckNavigation();
+      updateSessionProgress();
 
-      if (allComplete()) {
-        recordToday();
-        updateSessionProgress();
+      if (completesDay) {
         updateHistoryView();
         const time = completionTime(state.history[state.date]);
         completionTimeLabel.textContent = time ? `وقت الإكمال: ${time}` : "";
@@ -2088,7 +2304,7 @@
         return;
       }
 
-      updateSessionProgress();
+      const sura = suraOf(segment);
       if (completesSura) openSuraCompletionDialog(sura);
       else if (completesSegment) scheduleAdvance(sura, index);
     }
@@ -2118,9 +2334,11 @@
       askConfirmation("إعادة العداد؟", `سيعود عداد ${segment.surah} ${segment.range} إلى الصفر.`, () => withState(() => {
         progress[segment.id] = 0;
         suwarState.completedAt[suraOf(segment).id] = null;
-        updateCard(segment, index, true);
-        updateDeckNavigation();
-        updateSessionProgress();
+        return () => {
+          updateCard(segment, index, true);
+          updateDeckNavigation();
+          updateSessionProgress();
+        };
       }));
     }
 
@@ -2129,14 +2347,16 @@
       withState(() => clearDayProgress(announce));
     }
 
-    // Runs inside a withState operation only.
+    // Within a withState operation only: clears today's counts and returns the page work.
     function clearDayProgress(announce) {
       for (const segment of segments) progress[segment.id] = 0;
       for (const sura of RUQYAH_SUWAR) suwarState.completedAt[sura.id] = null;
       suraIndices = {};
-      selectSura(RUQYAH_SUWAR[0].id, true, "back");
-      updateHistoryView();
-      if (announce) liveRegion.textContent = "أُعيدت عدادات اليوم";
+      return () => {
+        selectSura(RUQYAH_SUWAR[0].id, true, "back");
+        updateHistoryView();
+        if (announce) liveRegion.textContent = "أُعيدت عدادات اليوم";
+      };
     }
 
     function recentDates(days) {
@@ -2174,8 +2394,11 @@
             delete state.history[date];
             delete suwarState.history[date];
           }
-          clearDayProgress(false);
-          liveRegion.textContent = "حُذف سجل آخر سبعة أيام";
+          const showCleared = clearDayProgress(false);
+          return () => {
+            showCleared();
+            liveRegion.textContent = "حُذف سجل آخر سبعة أيام";
+          };
         })
       );
     }
@@ -2188,8 +2411,11 @@
         () => withState(() => {
           state.history = {};
           suwarState.history = {};
-          clearDayProgress(false);
-          liveRegion.textContent = "حُذف السجل كاملًا";
+          const showCleared = clearDayProgress(false);
+          return () => {
+            showCleared();
+            liveRegion.textContent = "حُذف السجل كاملًا";
+          };
         })
       );
     }
@@ -2489,6 +2715,12 @@
       const chip = event.target.closest("[data-sura]");
       if (chip) selectSura(chip.dataset.sura);
     });
+    // The skip link moves focus to the deck itself: following its #ruqyah-list would add a history entry that the
+    // hash handler then rewrites to the sura, so Back would land on the same view.
+    document.querySelector(".skip-link").addEventListener("click", event => {
+      event.preventDefault();
+      list.focus();
+    });
     // A sura deep link (#qaf, #jinn, #takwir, #kafirun, #nas) opens that sura at its first incomplete segment, and the
     // hash stays on it (athkar settles on #suwar; ruqyah has no parent tab). Any other hash becomes the shown sura's.
     addEventListener("hashchange", () => {
@@ -2608,8 +2840,8 @@
     settingsButton.addEventListener("click", () => {
       ensureCurrentDay();
       updateInstallUi();
-      updateHistoryView();
       settingsDialog.showModal();
+      updateHistoryView();
     });
     settingsDialogClose.addEventListener("click", () => settingsDialog.close());
     backupExportButton.addEventListener("click", exportBackup);
@@ -2640,19 +2872,7 @@
       selectSura(suraCompletionSwitch.dataset.sura);
       focusShownCard();
     });
-    // Another tab committed a change: reread it (read-only) and redraw as refreshFrom does. A session in memory keeps
-    // its own state.
-    stateChannel?.addEventListener("message", () => {
-      enqueueJob(() => {
-        if (storageMode !== "idb" || !state) return undefined;
-        const generation = storageGeneration;
-        return openDatabase()
-          .then(db => runTransaction(db, "readonly", (daily, suwar) => {
-            if (generation === storageGeneration && storageMode === "idb") refreshFrom(daily, suwar);
-          }))
-          .catch(() => {});
-      });
-    });
+    stateChannel?.addEventListener("message", refreshFromStore);
 
     themeSelect.addEventListener("change", () => {
       const theme = themeSelect.value;
@@ -2760,15 +2980,22 @@
     renderSuraPicker();
     initStore().then(() => {
       renderSuraDeck();
-      updateHistoryView();
       scheduleDayRollover();
     });
     updateInstallUi();
     registerServiceWorker();
     addEventListener("load", () => scheduleFirstUseInstallPrompt(2600), { once: true });
     document.fonts?.ready.then(() => fitVisibleCard());
+    // Back in view or out of the bfcache, this page may have missed other tabs' messages: reread the records.
     addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") ensureCurrentDay();
+      if (document.visibilityState !== "visible") return;
+      ensureCurrentDay();
+      refreshFromStore();
+    });
+    addEventListener("pageshow", event => {
+      if (!event.persisted) return;
+      ensureCurrentDay();
+      refreshFromStore();
     });
     addEventListener("focus", () => ensureCurrentDay());
   </script>
